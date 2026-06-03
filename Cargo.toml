@@ -11,10 +11,17 @@ homepage = "https://github.com/octofhir/sof"
 authors = ["OctoFHIR Team <funyloony@gmail.com>"]
 
 [workspace.dependencies]
+# Internal
+octofhir-sof = { path = "crates/octofhir-sof" }
+
 # Ecosystem (crates.io)
 octofhir-fhirpath = "0.4.46"
 octofhir-fhirschema = "0.3.19"
 octofhir-canonical-manager = "0.2.2"
+
+# CLI
+clap = { version = "4", features = ["derive", "env"] }
+anyhow = "1.0"
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
