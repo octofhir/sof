@@ -17,8 +17,9 @@ use std::path::PathBuf;
 
 use octofhir_sof::{SqlGenerator, ViewDefinition};
 use serde_json::Value;
-use sqlx::Connection;
-use sqlx::postgres::PgConnection;
+use sqlx_core::connection::Connection;
+use sqlx_core::error::Error as SqlxError;
+use sqlx_postgres::PgConnection;
 
 const SETUP_SQL: &str = r#"
 CREATE OR REPLACE FUNCTION fhir_ref_id(reference TEXT) RETURNS TEXT
@@ -68,7 +69,7 @@ async fn sql_on_fhir_conformance() {
     let mut conn = PgConnection::connect(&db_url)
         .await
         .expect("connect to SOF_CONFORMANCE_DB");
-    sqlx::raw_sql(SETUP_SQL)
+    sqlx_core::raw_sql::raw_sql(SETUP_SQL)
         .execute(&mut conn)
         .await
         .expect("install helper functions");
@@ -126,8 +127,8 @@ async fn run_file(conn: &mut PgConnection, path: &PathBuf, outcomes: &mut Vec<Ou
 
 /// (Re)create the per-file schema and insert every resource into a table named
 /// after its (lower-cased) resourceType, matching `ViewRunner`'s expectations.
-async fn load_resources(conn: &mut PgConnection, resources: &[Value]) -> Result<(), sqlx::Error> {
-    sqlx::raw_sql(
+async fn load_resources(conn: &mut PgConnection, resources: &[Value]) -> Result<(), SqlxError> {
+    sqlx_core::raw_sql::raw_sql(
         "DROP SCHEMA IF EXISTS conf CASCADE; CREATE SCHEMA conf; SET search_path TO conf, public;",
     )
     .execute(&mut *conn)
@@ -143,14 +144,16 @@ async fn load_resources(conn: &mut PgConnection, resources: &[Value]) -> Result<
             let ddl = format!(
                 "CREATE TABLE conf.\"{table}\" (id text, resource jsonb, resource_type text, status text)"
             );
-            sqlx::raw_sql(&ddl).execute(&mut *conn).await?;
+            sqlx_core::raw_sql::raw_sql(&ddl)
+                .execute(&mut *conn)
+                .await?;
         }
         let id = res
             .get("id")
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string();
-        sqlx::query(&format!(
+        sqlx_core::query::query(&format!(
             "INSERT INTO conf.\"{table}\" (id, resource, resource_type, status) VALUES ($1, $2, $3, 'created')"
         ))
         .bind(id)
@@ -191,7 +194,9 @@ async fn run_test(conn: &mut PgConnection, file: &str, title: &str, test: &Value
     };
 
     let wrapped = format!("SELECT coalesce(jsonb_agg(t), '[]'::jsonb) FROM ({sql}) t");
-    let rows: Result<(Value,), sqlx::Error> = sqlx::query_as(&wrapped).fetch_one(&mut *conn).await;
+    let rows: Result<(Value,), SqlxError> = sqlx_core::query_as::query_as(&wrapped)
+        .fetch_one(&mut *conn)
+        .await;
 
     let actual = match rows {
         Ok((v,)) => v,

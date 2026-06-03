@@ -43,10 +43,5 @@ parquet = ["dep:arrow", "dep:parquet"]
 
 [dev-dependencies]
 tokio-test = "0.4"
-sqlx = { version = "0.8", default-features = false, features = [
-    "postgres",
-    "runtime-tokio",
-    "json",
-] }
 tokio = { workspace = true }
 serde_json = { workspace = true }
