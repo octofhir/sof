@@ -157,6 +157,13 @@ pub struct Constant {
 
     /// Decimal value of the constant.
     pub value_decimal: Option<f64>,
+
+    /// Any other polymorphic `value[x]` field (`valueCode`, `valueUri`,
+    /// `valueDateTime`, `valuePositiveInt`, …). The SQL-on-FHIR spec allows the
+    /// full FHIR primitive `value[x]` set on a constant; the explicit fields
+    /// above cover the common cases, and this captures the remainder.
+    #[serde(flatten)]
+    pub values: serde_json::Map<String, Value>,
 }
 
 impl ViewDefinition {
@@ -368,6 +375,7 @@ mod tests {
             value_integer: None,
             value_boolean: None,
             value_decimal: None,
+            values: Default::default(),
         };
         assert_eq!(string_const.value(), Value::String("test".to_string()));
 
@@ -377,6 +385,7 @@ mod tests {
             value_integer: Some(42),
             value_boolean: None,
             value_decimal: None,
+            values: Default::default(),
         };
         assert_eq!(int_const.value(), json!(42));
 
@@ -386,6 +395,7 @@ mod tests {
             value_integer: None,
             value_boolean: Some(true),
             value_decimal: None,
+            values: Default::default(),
         };
         assert_eq!(bool_const.value(), Value::Bool(true));
     }
