@@ -850,41 +850,56 @@ impl Lower {
     /// Replace `%name` constant references with their FHIRPath literal text.
     /// Errors on a reference to an undefined constant.
     fn substitute(&self, path: &str) -> Result<String, Error> {
-        let mut out = String::with_capacity(path.len());
-        let mut chars = path.chars().peekable();
-        while let Some(c) = chars.next() {
-            if c != '%' {
-                out.push(c);
-                continue;
-            }
-            let mut name = String::new();
-            while let Some(&nc) = chars.peek() {
-                if nc.is_ascii_alphanumeric() || nc == '_' {
-                    name.push(nc);
-                    chars.next();
-                } else {
-                    break;
-                }
-            }
-            if name.is_empty() {
-                out.push('%');
-                continue;
-            }
-            match self.constants.get(&name) {
-                Some(lit) => out.push_str(lit),
-                None => {
-                    return Err(Error::InvalidViewDefinition(format!(
-                        "undefined constant %{name}"
-                    )));
-                }
-            }
-        }
-        Ok(out)
+        substitute_constants(path, &self.constants)
     }
 }
 
+/// Replace `%name` constant references with their FHIRPath literal text.
+/// `%rowIndex` is preserved for the evaluator to resolve. Errors on a reference
+/// to an undefined constant.
+pub(crate) fn substitute_constants(
+    path: &str,
+    constants: &HashMap<String, String>,
+) -> Result<String, Error> {
+    let mut out = String::with_capacity(path.len());
+    let mut chars = path.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '%' {
+            out.push(c);
+            continue;
+        }
+        let mut name = String::new();
+        while let Some(&nc) = chars.peek() {
+            if nc.is_ascii_alphanumeric() || nc == '_' {
+                name.push(nc);
+                chars.next();
+            } else {
+                break;
+            }
+        }
+        if name.is_empty() {
+            out.push('%');
+            continue;
+        }
+        if name == "rowIndex" {
+            out.push('%');
+            out.push_str(&name);
+            continue;
+        }
+        match constants.get(&name) {
+            Some(lit) => out.push_str(lit),
+            None => {
+                return Err(Error::InvalidViewDefinition(format!(
+                    "undefined constant %{name}"
+                )));
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// Render each constant as a FHIRPath literal for substitution into selectors.
-fn build_constants(view: &ViewDefinition) -> Result<HashMap<String, String>, Error> {
+pub(crate) fn build_constants(view: &ViewDefinition) -> Result<HashMap<String, String>, Error> {
     let mut map = HashMap::new();
     for c in &view.constant {
         map.insert(c.name.clone(), constant_literal(c)?);

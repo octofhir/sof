@@ -37,12 +37,14 @@
 //! See: <https://build.fhir.org/ig/FHIR/sql-on-fhir-v2/>
 
 mod column;
+mod eval;
 pub mod output;
 mod runner;
 mod sql_generator;
 mod view_definition;
 
 pub use column::{ColumnInfo, ColumnType};
+pub use eval::execute;
 pub use runner::{ViewResult, ViewRunner};
 pub use sql_generator::{GeneratedColumn, GeneratedSql, SqlGenerator};
 pub use view_definition::{Column, Constant, SelectColumn, ViewDefinition, WhereClause};
