@@ -137,6 +137,18 @@ impl FhirSchemaProvider {
             .is_some_and(|el| el.choices.is_some())
     }
 
+    /// Classify the element reached by `path` as a primitive value, a
+    /// `Reference`, or any other complex/backbone element. `None` when no
+    /// element resolves there.
+    pub(crate) fn element_kind_at(&self, root_type: &str, path: &[&str]) -> Option<ElementKind> {
+        let el = self.element_at(root_type, path)?;
+        Some(match el.type_name.as_deref() {
+            Some("Reference") => ElementKind::Reference,
+            Some(t) if is_fhir_primitive(t) => ElementKind::Primitive,
+            _ => ElementKind::Complex,
+        })
+    }
+
     /// The set of elements available *at* `path` (i.e. its children, or the
     /// resource's top-level elements when `path` is empty).
     fn elements_at(
@@ -204,6 +216,46 @@ impl SchemaProvider for FhirSchemaProvider {
         let root = self.tables.get(&table.to_lowercase())?;
         self.element_at(root, path)?.array
     }
+}
+
+/// The shape of a resolved FHIR element, for column-selector validation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ElementKind {
+    /// A FHIR primitive (string, code, dateTime, …) — a tabular-friendly value.
+    Primitive,
+    /// A `Reference` — needs `getReferenceKey()` to yield a usable key.
+    Reference,
+    /// Any other complex type or inline backbone element.
+    Complex,
+}
+
+/// FHIR primitive data types (spec "Primitive Types"), the values a flat column
+/// can hold directly.
+fn is_fhir_primitive(type_name: &str) -> bool {
+    matches!(
+        type_name,
+        "base64Binary"
+            | "boolean"
+            | "canonical"
+            | "code"
+            | "date"
+            | "dateTime"
+            | "decimal"
+            | "id"
+            | "instant"
+            | "integer"
+            | "integer64"
+            | "markdown"
+            | "oid"
+            | "positiveInt"
+            | "string"
+            | "time"
+            | "unsignedInt"
+            | "uri"
+            | "url"
+            | "uuid"
+            | "xhtml"
+    )
 }
 
 fn col(name: &str, data_type: DataType, not_null: bool, ordinal: usize) -> ColumnInfo {

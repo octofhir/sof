@@ -11,7 +11,7 @@ use octofhir_fhirpath::{ExpressionNode, parse_ast};
 use octofhir_sof::{Column, SelectColumn, SqlGenerator, ViewDefinition};
 
 use crate::finding::{Finding, Severity};
-use crate::provider::FhirSchemaProvider;
+use crate::provider::{ElementKind, FhirSchemaProvider};
 
 /// One navigation step extracted from a FHIRPath selector.
 enum Step {
@@ -113,7 +113,9 @@ fn check_column(
     out: &mut Vec<Finding>,
 ) {
     let collection = col.collection.unwrap_or(false);
-    check_selector_named(&col.path, &col.name, resource, collection, provider, out);
+    check_selector_named(
+        &col.path, &col.name, resource, collection, true, provider, out,
+    );
 }
 
 fn check_selector(
@@ -123,14 +125,24 @@ fn check_selector(
     provider: &FhirSchemaProvider,
     out: &mut Vec<Finding>,
 ) {
-    check_selector_named(path, path, resource, is_collection_context, provider, out);
+    check_selector_named(
+        path,
+        path,
+        resource,
+        is_collection_context,
+        false,
+        provider,
+        out,
+    );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn check_selector_named(
     path: &str,
     location: &str,
     resource: &str,
     collection_ok: bool,
+    is_column: bool,
     provider: &FhirSchemaProvider,
     out: &mut Vec<Finding>,
 ) {
@@ -141,14 +153,24 @@ fn check_selector_named(
     if !linearize(&ast, &mut steps) {
         return; // not a plain navigation (operators, etc.) — skip conservatively
     }
-    validate_steps(&steps, location, resource, collection_ok, provider, out);
+    validate_steps(
+        &steps,
+        location,
+        resource,
+        collection_ok,
+        is_column,
+        provider,
+        out,
+    );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn validate_steps(
     steps: &[Step],
     location: &str,
     resource: &str,
     collection_ok: bool,
+    is_column: bool,
     provider: &FhirSchemaProvider,
     out: &mut Vec<Finding>,
 ) {
@@ -204,6 +226,19 @@ fn validate_steps(
     if resolvable && pending_array && !collection_ok && !fh04_emitted {
         out.push(array_terminal(location));
     }
+
+    // Type-shape checks for scalar column selectors: the spec expects a column
+    // to yield a primitive value. A non-array path that lands on a Reference or
+    // any other complex element is flagged (FH05/FH03). Array terminals are
+    // already covered by FH04; collection columns opt into structured output.
+    if is_column && resolvable && !collection_ok && !pending_array && !path.is_empty() {
+        let refs: Vec<&str> = path.iter().map(String::as_str).collect();
+        match provider.element_kind_at(resource, &refs) {
+            Some(ElementKind::Reference) => out.push(reference_not_resolved(location)),
+            Some(ElementKind::Complex) => out.push(complex_into_scalar(location)),
+            _ => {}
+        }
+    }
 }
 
 fn unknown_field(field: &str, valid: &[String], location: &str) -> Finding {
@@ -223,6 +258,26 @@ fn choice_not_narrowed(field: &str, location: &str) -> Finding {
             "selects choice element `{field}` without narrowing; add \
              ofType(<Type>) to pick a concrete type before extracting a value"
         ),
+    )
+    .at(location)
+}
+
+fn reference_not_resolved(location: &str) -> Finding {
+    Finding::fhir(
+        "FH05",
+        Severity::Warning,
+        "selects a Reference element directly; use getReferenceKey() to extract \
+         a stable key, or navigate to a primitive such as .reference",
+    )
+    .at(location)
+}
+
+fn complex_into_scalar(location: &str) -> Finding {
+    Finding::fhir(
+        "FH03",
+        Severity::Warning,
+        "selects a complex element into a scalar column; navigate to a primitive \
+         leaf, or mark the column collection to emit structured JSON",
     )
     .at(location)
 }
@@ -306,7 +361,9 @@ mod tests {
             "elements": {
                 "id": { "type": "id" },
                 "gender": { "type": "code" },
-                "name": { "type": "HumanName", "array": true }
+                "name": { "type": "HumanName", "array": true },
+                "managingOrganization": { "type": "Reference" },
+                "generalPractitioner": { "type": "Reference", "array": true }
             }
         }))
         .unwrap();
@@ -377,6 +434,42 @@ mod tests {
     fn array_terminal_into_scalar_reports_fh04() {
         let f = lint_view(&view("name", false), &provider());
         assert_eq!(codes(&f), vec!["FH04"]);
+    }
+
+    #[test]
+    fn reference_into_scalar_reports_fh05() {
+        let f = lint_view(&view("managingOrganization", false), &provider());
+        assert_eq!(codes(&f), vec!["FH05"]);
+    }
+
+    #[test]
+    fn reference_key_is_clean() {
+        let f = lint_view(
+            &view("managingOrganization.getReferenceKey()", false),
+            &provider(),
+        );
+        assert!(f.is_empty(), "{f:?}");
+    }
+
+    #[test]
+    fn reference_navigated_to_primitive_is_clean() {
+        // .reference is a primitive string leaf on Reference; not modelled here,
+        // so navigation past Reference is unresolved and must not false-positive.
+        let f = lint_view(&view("gender", false), &provider());
+        assert!(f.is_empty(), "{f:?}");
+    }
+
+    #[test]
+    fn complex_into_scalar_reports_fh03() {
+        // name.first() lands on a HumanName (complex) in a scalar column.
+        let f = lint_view(&view("name.first()", false), &provider());
+        assert_eq!(codes(&f), vec!["FH03"]);
+    }
+
+    #[test]
+    fn complex_into_collection_is_clean() {
+        let f = lint_view(&view("name.first()", true), &provider());
+        assert!(f.is_empty(), "{f:?}");
     }
 
     fn obs_provider() -> FhirSchemaProvider {
