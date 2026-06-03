@@ -466,6 +466,11 @@ impl Lower {
                 "jsonb_build_array(to_jsonb(NOT ({})))",
                 self.bool(object, ctx)?
             )),
+            "lowBoundary" | "highBoundary" => {
+                let hint = boundary_hint(object);
+                let oc = self.coll(object, ctx)?;
+                Ok(self.boundary(&oc, name == "lowBoundary", hint))
+            }
             _ => {
                 let oc = self.coll(object, ctx)?;
                 self.apply_on_coll(name, &oc, args, ctx)
@@ -512,8 +517,8 @@ impl Lower {
             }
             "getReferenceKey" => self.reference_key(coll, args.first()),
             "getResourceKey" => self.resource_key(coll),
-            "lowBoundary" => Ok(self.boundary(coll, true)),
-            "highBoundary" => Ok(self.boundary(coll, false)),
+            "lowBoundary" => Ok(self.boundary(coll, true, BoundaryType::Unknown)),
+            "highBoundary" => Ok(self.boundary(coll, false, BoundaryType::Unknown)),
             "toString" => Ok(coll.to_string()),
             other => Err(Error::InvalidPath(format!(
                 "unsupported function {other}()"
@@ -576,16 +581,33 @@ impl Lower {
         ))
     }
 
-    /// FHIR decimal precision boundary; non-numeric values pass through.
-    fn boundary(&self, coll: &str, low: bool) -> String {
+    /// FHIR precision boundary. Numbers use the decimal half-ulp boundary;
+    /// date/dateTime/time strings are widened to their precision-filled bounds
+    /// (`lowBoundary` to the earliest instant, `highBoundary` to the latest).
+    fn boundary(&self, coll: &str, low: bool, hint: BoundaryType) -> String {
         let sign = if low { "-" } else { "+" };
         let n = self.fresh();
+        let e = format!("_b{n}._e");
+        let t = format!("({e} #>> '{{}}')");
+        let numeric = format!(
+            "(({t})::numeric {sign} (0.5 / power(10, coalesce(length(nullif(split_part({t}, '.', 2), '')), 0))::numeric))"
+        );
+        let string_bound = match hint {
+            BoundaryType::Date => date_bound(&t, low),
+            BoundaryType::DateTime => datetime_bound(&t, low),
+            BoundaryType::Time => time_bound(&t, low),
+            BoundaryType::Unknown => format!(
+                "CASE WHEN position(':' in {t}) > 0 THEN {} ELSE {} END",
+                time_bound(&t, low),
+                date_bound(&t, low)
+            ),
+        };
         format!(
             "(SELECT coalesce(jsonb_agg(\
-               CASE WHEN jsonb_typeof(_b{n}._e) = 'number' \
-                 THEN to_jsonb((_b{n}._e #>> '{{}}')::numeric {sign} \
-                   (0.5 / power(10, coalesce(length(nullif(split_part(_b{n}._e #>> '{{}}', '.', 2), '')), 0))::numeric)) \
-                 ELSE _b{n}._e END),'[]'::jsonb) \
+               CASE jsonb_typeof({e}) \
+                 WHEN 'number' THEN to_jsonb({numeric}) \
+                 WHEN 'string' THEN to_jsonb({string_bound}) \
+                 ELSE {e} END),'[]'::jsonb) \
              FROM jsonb_array_elements({coll}) AS _b{n}(_e))"
         )
     }
@@ -907,6 +929,87 @@ fn constant_literal(c: &Constant) -> Result<String, Error> {
 /// A FHIRPath single-quoted string literal (backslash-escaped).
 fn fhirpath_string(s: &str) -> String {
     format!("'{}'", s.replace('\\', "\\\\").replace('\'', "\\'"))
+}
+
+/// The FHIR temporal type a boundary function operates on, inferred from a
+/// leading `ofType(T)` where present.
+#[derive(Debug, Clone, Copy)]
+enum BoundaryType {
+    Date,
+    DateTime,
+    Time,
+    Unknown,
+}
+
+fn boundary_hint(object: &ExpressionNode) -> BoundaryType {
+    match object {
+        ExpressionNode::MethodCall(m) if m.method == "ofType" => {
+            let name = match m.arguments.first() {
+                Some(ExpressionNode::Identifier(n)) => n.name.to_lowercase(),
+                Some(ExpressionNode::TypeInfo(t)) => t.name.to_lowercase(),
+                _ => return BoundaryType::Unknown,
+            };
+            match name.as_str() {
+                "datetime" | "instant" => BoundaryType::DateTime,
+                "date" => BoundaryType::Date,
+                "time" => BoundaryType::Time,
+                _ => BoundaryType::Unknown,
+            }
+        }
+        ExpressionNode::Parenthesized(e) => boundary_hint(e),
+        _ => BoundaryType::Unknown,
+    }
+}
+
+/// Widen a partial date string `t` to its low/high full-date bound.
+fn date_bound(t: &str, low: bool) -> String {
+    if low {
+        format!(
+            "CASE length({t}) WHEN 4 THEN {t} || '-01-01' WHEN 7 THEN {t} || '-01' ELSE {t} END"
+        )
+    } else {
+        format!(
+            "CASE length({t}) \
+               WHEN 4 THEN {t} || '-12-31' \
+               WHEN 7 THEN to_char(to_date({t}, 'YYYY-MM') + interval '1 month' - interval '1 day', 'YYYY-MM-DD') \
+               ELSE {t} END"
+        )
+    }
+}
+
+/// Widen a partial dateTime string `t`, using the timezone extremes (+14:00 for
+/// the earliest instant, -12:00 for the latest) the spec mandates.
+fn datetime_bound(t: &str, low: bool) -> String {
+    if low {
+        format!(
+            "CASE length({t}) \
+               WHEN 4 THEN {t} || '-01-01T00:00:00.000+14:00' \
+               WHEN 7 THEN {t} || '-01T00:00:00.000+14:00' \
+               WHEN 10 THEN {t} || 'T00:00:00.000+14:00' \
+               ELSE {t} END"
+        )
+    } else {
+        format!(
+            "CASE length({t}) \
+               WHEN 4 THEN {t} || '-12-31T23:59:59.999-12:00' \
+               WHEN 7 THEN to_char(to_date({t}, 'YYYY-MM') + interval '1 month' - interval '1 day', 'YYYY-MM-DD') || 'T23:59:59.999-12:00' \
+               WHEN 10 THEN {t} || 'T23:59:59.999-12:00' \
+               ELSE {t} END"
+        )
+    }
+}
+
+/// Widen a partial time string `t` to its low/high bound.
+fn time_bound(t: &str, low: bool) -> String {
+    if low {
+        format!(
+            "CASE length({t}) WHEN 2 THEN {t} || ':00:00.000' WHEN 5 THEN {t} || ':00.000' WHEN 8 THEN {t} || '.000' ELSE {t} END"
+        )
+    } else {
+        format!(
+            "CASE length({t}) WHEN 2 THEN {t} || ':59:59.999' WHEN 5 THEN {t} || ':59.999' WHEN 8 THEN {t} || '.999' ELSE {t} END"
+        )
+    }
 }
 
 fn capitalize_first(s: &str) -> String {
