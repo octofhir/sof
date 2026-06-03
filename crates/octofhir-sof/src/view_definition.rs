@@ -15,17 +15,20 @@ use crate::Error;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ViewDefinition {
-    /// The FHIR resource type (always "ViewDefinition").
-    pub resource_type: String,
+    /// The FHIR resource type (always "ViewDefinition" when present).
+    ///
+    /// Optional so that partial ViewDefinition objects (as used by the
+    /// SQL-on-FHIR conformance test suite) parse without a wrapper.
+    pub resource_type: Option<String>,
 
     /// Canonical URL identifying this ViewDefinition.
     pub url: Option<String>,
 
     /// Human-readable name for the view.
-    pub name: String,
+    pub name: Option<String>,
 
     /// Publication status: draft | active | retired | unknown.
-    pub status: String,
+    pub status: Option<String>,
 
     /// The FHIR resource type this view is based on (e.g., "Patient", "Observation").
     pub resource: String,
@@ -243,7 +246,7 @@ mod tests {
         });
 
         let view = ViewDefinition::from_json(&json).unwrap();
-        assert_eq!(view.name, "patient_demographics");
+        assert_eq!(view.name.as_deref(), Some("patient_demographics"));
         assert_eq!(view.resource, "Patient");
         assert_eq!(view.select.len(), 1);
 
