@@ -39,7 +39,7 @@ fn sql_on_fhir_conformance_in_memory() {
     // Ratcheting baseline. The vendored v2.1.0-pre suite (144 cases) introduced
     // `repeat`, `%rowIndex` and stricter `join`/empty semantics that are being
     // brought up to spec incrementally; lower this as features land, target 0.
-    const MAX_ALLOWED_FAILURES: usize = 24;
+    const MAX_ALLOWED_FAILURES: usize = 21;
     let failed = outcomes.iter().filter(|o| !o.passed).count();
     assert!(
         failed <= MAX_ALLOWED_FAILURES,

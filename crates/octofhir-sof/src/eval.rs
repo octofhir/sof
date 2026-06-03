@@ -387,6 +387,11 @@ impl Evaluator {
             "empty" => Ok(vec![Value::Bool(coll.is_empty())]),
             "count" => Ok(vec![Value::Number((coll.len() as i64).into())]),
             "join" => {
+                // join() over an empty collection yields the empty collection
+                // (i.e. null), not an empty string. (FHIR/sql-on-fhir.js fn_join)
+                if coll.is_empty() {
+                    return Ok(vec![]);
+                }
                 let sep = match args.first() {
                     Some(a) => self.string_arg(a)?,
                     None => String::new(),

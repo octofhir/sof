@@ -542,8 +542,12 @@ impl Lower {
             None => String::new(),
         };
         let n = self.fresh();
+        // join() over an empty collection yields the empty collection (null),
+        // not an empty string. (FHIR/sql-on-fhir.js fn_join)
         Ok(format!(
-            "jsonb_build_array(to_jsonb((SELECT coalesce(string_agg(_e #>> '{{}}', '{sep}'), '') FROM jsonb_array_elements({coll}) AS _jn{n}(_e))))"
+            "(SELECT CASE WHEN count(*) = 0 THEN '[]'::jsonb \
+             ELSE jsonb_build_array(to_jsonb(string_agg(_e #>> '{{}}', '{sep}'))) END \
+             FROM jsonb_array_elements({coll}) AS _jn{n}(_e))"
         ))
     }
 
