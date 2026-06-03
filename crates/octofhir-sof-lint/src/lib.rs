@@ -11,10 +11,12 @@
 
 mod finding;
 mod provider;
+mod structure;
 mod view_lint;
 
 pub use finding::{Finding, Severity};
 pub use provider::FhirSchemaProvider;
+pub use structure::validate_structure;
 pub use view_lint::{lint, lint_sql, lint_view};
 
 /// Errors raised while loading a FHIR package into a [`FhirSchemaProvider`].

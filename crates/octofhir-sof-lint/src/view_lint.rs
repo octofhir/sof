@@ -26,9 +26,11 @@ enum Step {
     Func(String),
 }
 
-/// Lint a ViewDefinition: selector validation plus generated-SQL analysis.
+/// Lint a ViewDefinition: structural validation, selector validation against
+/// the schema, plus generated-SQL analysis.
 pub fn lint(view: &ViewDefinition, provider: &FhirSchemaProvider) -> Vec<Finding> {
-    let mut findings = lint_view(view, provider);
+    let mut findings = crate::structure::validate_structure(view);
+    findings.extend(lint_view(view, provider));
     if let Ok(generated) = SqlGenerator::new().generate(view) {
         findings.extend(lint_sql(&generated.sql, provider));
     }

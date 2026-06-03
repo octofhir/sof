@@ -54,6 +54,14 @@ enum Command {
         out: Option<PathBuf>,
     },
 
+    /// Validate a ViewDefinition's structure against the spec, offline (no FHIR
+    /// package and no database): SQL-safe names, one iteration construct per
+    /// select, unique column names, consistent unionAll branches.
+    Validate {
+        /// Path to the ViewDefinition JSON file.
+        view: PathBuf,
+    },
+
     /// Validate a ViewDefinition's FHIRPath selectors and generated SQL against
     /// a FHIR package.
     Lint {
@@ -192,6 +200,18 @@ async fn main() -> Result<()> {
             };
             writer.write(&result, &mut sink).context("writing output")?;
             sink.flush().ok();
+        }
+        Command::Validate { view } => {
+            let view = load_view(&view)?;
+            let findings = octofhir_sof_lint::validate_structure(&view);
+            for finding in &findings {
+                println!("{finding}");
+            }
+            if findings.is_empty() {
+                println!("valid");
+            } else {
+                std::process::exit(1);
+            }
         }
         Command::Lint {
             view,
