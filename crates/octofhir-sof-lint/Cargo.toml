@@ -9,9 +9,12 @@ authors.workspace = true
 description = "Static lint and validation for SQL-on-FHIR ViewDefinitions"
 
 [dependencies]
+octofhir-sof = { workspace = true }
+octofhir-fhirpath = { workspace = true }
 octofhir-fhirschema = { workspace = true }
 octofhir-canonical-manager = { workspace = true }
 banshee_hir = { workspace = true }
+banshee_parser = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }

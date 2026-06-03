@@ -12,6 +12,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use octofhir_sof::output::get_writer;
 use octofhir_sof::{SqlGenerator, ViewDefinition, ViewRunner};
+use octofhir_sof_lint::{FhirSchemaProvider, Severity, lint};
 use sqlx_postgres::PgPool;
 
 #[derive(Parser)]
@@ -45,6 +46,22 @@ enum Command {
         /// Write to this file instead of stdout.
         #[arg(long)]
         out: Option<PathBuf>,
+    },
+
+    /// Validate a ViewDefinition's FHIRPath selectors and generated SQL against
+    /// a FHIR package.
+    Lint {
+        /// Path to the ViewDefinition JSON file.
+        view: PathBuf,
+
+        /// FHIR package name (e.g. hl7.fhir.r4.core).
+        #[arg(long)]
+        package: String,
+
+        /// Package version. When given, the package is installed if missing;
+        /// otherwise only an already-present package is used (offline).
+        #[arg(long)]
+        version: Option<String>,
     },
 }
 
@@ -91,6 +108,37 @@ async fn main() -> Result<()> {
             };
             writer.write(&result, &mut sink).context("writing output")?;
             sink.flush().ok();
+        }
+        Command::Lint {
+            view,
+            package,
+            version,
+        } => {
+            let view = load_view(&view)?;
+            let provider = FhirSchemaProvider::load(&package, version.as_deref())
+                .await
+                .with_context(|| format!("loading package {package}"))?;
+            if provider.is_empty() {
+                anyhow::bail!(
+                    "package `{package}` has no StructureDefinitions in the store; \
+                     pass --version to install it"
+                );
+            }
+
+            let findings = lint(&view, &provider);
+            let errors = findings
+                .iter()
+                .filter(|f| f.severity == Severity::Error)
+                .count();
+            for finding in &findings {
+                println!("{finding}");
+            }
+            if findings.is_empty() {
+                println!("no findings");
+            }
+            if errors > 0 {
+                std::process::exit(1);
+            }
         }
     }
     Ok(())

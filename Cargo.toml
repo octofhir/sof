@@ -13,6 +13,7 @@ authors = ["OctoFHIR Team <funyloony@gmail.com>"]
 [workspace.dependencies]
 # Internal
 octofhir-sof = { path = "crates/octofhir-sof" }
+octofhir-sof-lint = { path = "crates/octofhir-sof-lint" }
 
 # Ecosystem (crates.io)
 octofhir-fhirpath = "0.4.46"

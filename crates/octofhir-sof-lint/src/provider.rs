@@ -80,16 +80,24 @@ impl FhirSchemaProvider {
         Ok(provider)
     }
 
-    /// Initialise a default canonical-manager, install the package, then load it.
-    pub async fn install_and_load(package_name: &str, version: &str) -> Result<Self, LintError> {
+    /// Initialise a default canonical-manager and load a package, installing it
+    /// first when a `version` is given (offline-only when it is omitted).
+    pub async fn load(package_name: &str, version: Option<&str>) -> Result<Self, LintError> {
         let manager = CanonicalManager::with_default_config()
             .await
             .map_err(|e| LintError::PackageLoad(e.to_string()))?;
-        manager
-            .install_package(package_name, version)
-            .await
-            .map_err(|e| LintError::PackageLoad(e.to_string()))?;
+        if let Some(version) = version {
+            manager
+                .install_package(package_name, version)
+                .await
+                .map_err(|e| LintError::PackageLoad(e.to_string()))?;
+        }
         Self::from_package(&manager, package_name).await
+    }
+
+    /// True when no resource tables are known (e.g. the package was not found).
+    pub fn is_empty(&self) -> bool {
+        self.tables.is_empty()
     }
 
     fn elements_for_type(&self, ty: &str) -> Option<&HashMap<String, FhirSchemaElement>> {

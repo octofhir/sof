@@ -9,9 +9,13 @@
 //! The provider is the schema source for the FHIR lint pack. It is offline once
 //! the FHIR package is present in the canonical-manager store.
 
+mod finding;
 mod provider;
+mod view_lint;
 
+pub use finding::{Finding, Severity};
 pub use provider::FhirSchemaProvider;
+pub use view_lint::{lint, lint_sql, lint_view};
 
 /// Errors raised while loading a FHIR package into a [`FhirSchemaProvider`].
 #[derive(Debug, thiserror::Error)]

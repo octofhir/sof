@@ -507,6 +507,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "banshee_lexer"
+version = "0.1.0"
+dependencies = [
+ "banshee_syntax",
+ "text-size",
+]
+
+[[package]]
+name = "banshee_parser"
+version = "0.1.0"
+dependencies = [
+ "banshee_lexer",
+ "banshee_syntax",
+ "cstree",
+ "text-size",
+]
+
+[[package]]
 name = "banshee_syntax"
 version = "0.1.0"
 dependencies = [
@@ -2487,6 +2505,7 @@ dependencies = [
  "anyhow",
  "clap",
  "octofhir-sof",
+ "octofhir-sof-lint",
  "serde_json",
  "sqlx-postgres",
  "tokio",
@@ -2497,8 +2516,11 @@ name = "octofhir-sof-lint"
 version = "0.1.0"
 dependencies = [
  "banshee_hir",
+ "banshee_parser",
  "octofhir-canonical-manager",
+ "octofhir-fhirpath",
  "octofhir-fhirschema",
+ "octofhir-sof",
  "serde_json",
  "thiserror",
  "tokio",
