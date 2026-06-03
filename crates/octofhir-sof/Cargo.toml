@@ -1,0 +1,45 @@
+[package]
+name = "octofhir-sof"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "SQL on FHIR implementation for OctoFHIR"
+
+[dependencies]
+# FHIR
+octofhir-fhirpath = { workspace = true }
+
+# Database
+sqlx-core = { workspace = true }
+sqlx-postgres = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Output formats
+csv = { workspace = true }
+arrow = { workspace = true, optional = true }
+parquet = { workspace = true, optional = true }
+
+# Async
+async-trait = { workspace = true }
+tokio = { workspace = true }
+futures-util = { workspace = true }
+pin-project-lite = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+
+# Tracing
+tracing = { workspace = true }
+
+[features]
+default = []
+parquet = ["dep:arrow", "dep:parquet"]
+
+[dev-dependencies]
+tokio-test = "0.4"
