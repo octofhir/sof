@@ -77,6 +77,7 @@ impl SqlGenerator {
             resource_type: view.resource.clone(),
             constants,
             seq: Cell::new(0),
+            row_idx: std::cell::RefCell::new("0".to_string()),
         };
 
         let table = view.resource.to_lowercase();
@@ -215,6 +216,10 @@ struct Lower {
     /// Constant name → FHIRPath literal text, pre-rendered for substitution.
     constants: HashMap<String, String>,
     seq: Cell<usize>,
+    /// SQL expression yielding the current `%rowIndex` (0-based). "0" at the top
+    /// level; a `forEach`/`forEachOrNull` sets it to `<alias>.ord - 1` for the
+    /// duration of that level (saved/restored around each `build_select`).
+    row_idx: std::cell::RefCell<String>,
 }
 
 impl Lower {
@@ -232,7 +237,12 @@ impl Lower {
         prefix: &[String],
         ctx: &str,
     ) -> Result<Vec<Plan>, Error> {
-        // forEach / forEachOrNull establish a new focus for this level.
+        // `%rowIndex` is scoped to this level: save the enclosing value, restore
+        // it before returning so siblings/unionAll branches inherit correctly.
+        let saved_ri = self.row_idx.borrow().clone();
+
+        // forEach / forEachOrNull establish a new focus (and a new %rowIndex) for
+        // this level.
         let (joins, ctx2): (Vec<String>, String) = if let Some(p) = &select.for_each {
             self.for_each_join(p, prefix, ctx, false)?
         } else if let Some(p) = &select.for_each_or_null {
@@ -241,16 +251,30 @@ impl Lower {
             (prefix.to_vec(), ctx.to_string())
         };
 
-        // This node's own columns, evaluated against the (possibly new) focus.
+        let plans = self.build_level(select, &joins, &ctx2);
+
+        *self.row_idx.borrow_mut() = saved_ri;
+        plans
+    }
+
+    /// Lower a select's own columns, nested selects and unionAll branches against
+    /// an already-established focus and `%rowIndex` (set by the caller).
+    fn build_level(
+        &self,
+        select: &SelectColumn,
+        joins: &[String],
+        ctx2: &str,
+    ) -> Result<Vec<Plan>, Error> {
+        // This node's own columns, evaluated against the focus.
         let mut own = Vec::new();
         if let Some(cols) = &select.column {
             for col in cols {
-                own.push(self.lower_column(col, &ctx2)?);
+                own.push(self.lower_column(col, ctx2)?);
             }
         }
 
         let mut plans = vec![Plan {
-            joins,
+            joins: joins.to_vec(),
             columns: own,
         }];
 
@@ -258,7 +282,7 @@ impl Lower {
         for child in &select.select {
             let mut next = Vec::new();
             for p in &plans {
-                for cp in self.build_select(child, &p.joins, &ctx2)? {
+                for cp in self.build_select(child, &p.joins, ctx2)? {
                     next.push(p.cross(&cp));
                 }
             }
@@ -271,7 +295,7 @@ impl Lower {
             let mut unioned = Vec::new();
             for p in &plans {
                 for branch in branches {
-                    for bp in self.build_select(branch, &p.joins, &ctx2)? {
+                    for bp in self.build_select(branch, &p.joins, ctx2)? {
                         unioned.push(p.cross(&bp));
                     }
                 }
@@ -293,13 +317,25 @@ impl Lower {
         let ast = parse_ast(&path).map_err(|e| Error::FhirPath(e.to_string()))?;
         let coll = self.coll(&ast, ctx)?;
         let alias = format!("fe{}", self.fresh());
+        // WITH ORDINALITY exposes a 1-based position; %rowIndex is 0-based.
         let join = if or_null {
-            format!("LEFT JOIN LATERAL jsonb_array_elements({coll}) AS {alias}(value) ON true")
+            format!(
+                "LEFT JOIN LATERAL jsonb_array_elements({coll}) WITH ORDINALITY AS {alias}(value, ord) ON true"
+            )
         } else {
-            format!("CROSS JOIN LATERAL jsonb_array_elements({coll}) AS {alias}(value)")
+            format!(
+                "CROSS JOIN LATERAL jsonb_array_elements({coll}) WITH ORDINALITY AS {alias}(value, ord)"
+            )
         };
         let mut joins = prefix.to_vec();
         joins.push(join);
+        // For forEachOrNull, the null row carries %rowIndex = 0 (per spec).
+        let ri = if or_null {
+            format!("coalesce(({alias}.ord - 1), 0)")
+        } else {
+            format!("({alias}.ord - 1)")
+        };
+        *self.row_idx.borrow_mut() = ri;
         Ok((joins, format!("{alias}.value")))
     }
 
@@ -359,6 +395,9 @@ impl Lower {
             ExpressionNode::Variable(v) => {
                 if v.name == "this" || v.name == "$this" {
                     Ok(format!("jsonb_build_array({ctx})"))
+                } else if v.name == "rowIndex" {
+                    let ri = self.row_idx.borrow();
+                    Ok(format!("jsonb_build_array(to_jsonb(({ri})::bigint))"))
                 } else {
                     Err(Error::InvalidPath(format!(
                         "unsupported variable ${}",
