@@ -4,6 +4,8 @@
 //! `SqlGenerator`, `ViewRunner` and output writers. All real work lives in the
 //! library so it stays embeddable.
 
+mod diagnostic;
+
 use std::fs;
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -12,7 +14,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use octofhir_sof::output::get_writer;
 use octofhir_sof::{SqlGenerator, ViewDefinition, ViewRunner};
-use octofhir_sof_lint::{FhirSchemaProvider, Severity, lint};
+use octofhir_sof_lint::{FhirSchemaProvider, Severity, lint, validate_structure};
 use sqlx_postgres::PgPool;
 
 #[derive(Parser)]
@@ -20,6 +22,10 @@ use sqlx_postgres::PgPool;
 struct Cli {
     #[command(subcommand)]
     command: Command,
+
+    /// Disable coloured output (also honours the NO_COLOR environment variable).
+    #[arg(long, global = true)]
+    no_color: bool,
 }
 
 #[derive(Subcommand)]
@@ -60,6 +66,10 @@ enum Command {
     Validate {
         /// Path to the ViewDefinition JSON file.
         view: PathBuf,
+
+        /// Emit findings as machine-readable JSON instead of a report.
+        #[arg(long)]
+        json: bool,
     },
 
     /// Run a SQL-on-FHIR test-case file (the official content-test format:
@@ -85,7 +95,21 @@ enum Command {
         /// otherwise only an already-present package is used (offline).
         #[arg(long)]
         version: Option<String>,
+
+        /// Emit findings as machine-readable JSON instead of a report.
+        #[arg(long)]
+        json: bool,
     },
+}
+
+/// Read a ViewDefinition file, returning both its raw text (for diagnostics
+/// spans) and the parsed view.
+fn read_view(path: &PathBuf) -> Result<(String, ViewDefinition)> {
+    let text = fs::read_to_string(path)
+        .with_context(|| format!("reading ViewDefinition {}", path.display()))?;
+    let view = ViewDefinition::parse(&text)
+        .with_context(|| format!("parsing ViewDefinition {}", path.display()))?;
+    Ok((text, view))
 }
 
 fn load_view(path: &PathBuf) -> Result<ViewDefinition> {
@@ -163,7 +187,7 @@ fn push_resource(value: serde_json::Value, out: &mut Vec<serde_json::Value>) {
 
 /// Run one SQL-on-FHIR test-case file in memory, printing per-test results.
 /// Returns `(passed, total)`.
-fn run_test_file(path: &PathBuf) -> Result<(usize, usize)> {
+fn run_test_file(path: &PathBuf, color: bool) -> Result<(usize, usize)> {
     let doc: serde_json::Value = serde_json::from_str(
         &fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?,
     )
@@ -189,11 +213,12 @@ fn run_test_file(path: &PathBuf) -> Result<(usize, usize)> {
             .and_then(|v| v.as_str())
             .unwrap_or("<untitled>");
         let (ok, detail) = run_one_test(test, &resources);
+        let marker = diagnostic::marker(ok, color);
         if ok {
             pass += 1;
-            println!("  PASS [{name}] {title}");
+            println!("  {marker} [{name}] {title}");
         } else {
-            println!("  FAIL [{name}] {title}: {detail}");
+            println!("  {marker} [{name}] {title}: {detail}");
         }
     }
     Ok((pass, total))
@@ -269,9 +294,36 @@ fn canonical_json(v: &serde_json::Value) -> String {
     }
 }
 
+/// Print findings (JSON or rustc-style) and report whether any are errors.
+fn report_findings(
+    origin: &str,
+    source: &str,
+    findings: &[octofhir_sof_lint::Finding],
+    json: bool,
+    color: bool,
+) -> bool {
+    if json {
+        println!("{}", diagnostic::render_findings_json(findings));
+    } else {
+        print!(
+            "{}",
+            diagnostic::render_findings(origin, source, findings, color)
+        );
+    }
+    findings.iter().any(|f| f.severity == Severity::Error)
+}
+
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() {
     let cli = Cli::parse();
+    let color = diagnostic::use_color(cli.no_color);
+    if let Err(e) = run(cli, color).await {
+        eprintln!("{} {e:#}", diagnostic::error_prefix(color));
+        std::process::exit(1);
+    }
+}
+
+async fn run(cli: Cli, color: bool) -> Result<()> {
     match cli.command {
         Command::Generate { view } => {
             let view = load_view(&view)?;
@@ -318,16 +370,17 @@ async fn main() -> Result<()> {
             writer.write(&result, &mut sink).context("writing output")?;
             sink.flush().ok();
         }
-        Command::Validate { view } => {
-            let view = load_view(&view)?;
-            let findings = octofhir_sof_lint::validate_structure(&view);
-            for finding in &findings {
-                println!("{finding}");
-            }
-            if findings.is_empty() {
-                println!("valid");
+        Command::Validate { view, json } => {
+            let origin = view.display().to_string();
+            let (source, view) = read_view(&view)?;
+            let findings = validate_structure(&view);
+            if findings.is_empty() && !json {
+                println!("{}", diagnostic::ok("valid", color));
             } else {
-                std::process::exit(1);
+                let has_error = report_findings(&origin, &source, &findings, json, color);
+                if has_error {
+                    std::process::exit(1);
+                }
             }
         }
         Command::Test { manifest } => {
@@ -345,11 +398,19 @@ async fn main() -> Result<()> {
             }
             let (mut pass, mut total) = (0usize, 0usize);
             for file in &files {
-                let (p, t) = run_test_file(file)?;
+                let (p, t) = run_test_file(file, color)?;
                 pass += p;
                 total += t;
             }
-            println!("{pass}/{total} passed");
+            let summary = format!("{pass}/{total} passed");
+            println!(
+                "{}",
+                if pass == total {
+                    diagnostic::ok(&summary, color)
+                } else {
+                    summary
+                }
+            );
             if pass < total {
                 std::process::exit(1);
             }
@@ -358,8 +419,10 @@ async fn main() -> Result<()> {
             view,
             package,
             version,
+            json,
         } => {
-            let view = load_view(&view)?;
+            let origin = view.display().to_string();
+            let (source, view) = read_view(&view)?;
             let provider = FhirSchemaProvider::load(&package, version.as_deref())
                 .await
                 .with_context(|| format!("loading package {package}"))?;
@@ -371,18 +434,13 @@ async fn main() -> Result<()> {
             }
 
             let findings = lint(&view, &provider);
-            let errors = findings
-                .iter()
-                .filter(|f| f.severity == Severity::Error)
-                .count();
-            for finding in &findings {
-                println!("{finding}");
-            }
-            if findings.is_empty() {
-                println!("no findings");
-            }
-            if errors > 0 {
-                std::process::exit(1);
+            if findings.is_empty() && !json {
+                println!("{}", diagnostic::ok("no findings", color));
+            } else {
+                let has_error = report_findings(&origin, &source, &findings, json, color);
+                if has_error {
+                    std::process::exit(1);
+                }
             }
         }
     }

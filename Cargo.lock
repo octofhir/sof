@@ -93,6 +93,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "annotate-snippets"
+version = "0.11.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "710e8eae58854cdc1790fcb56cca04d712a17be849eeb81da2a724bf4bae2bc4"
+dependencies = [
+ "anstyle",
+ "unicode-width",
+]
+
+[[package]]
 name = "anstream"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2502,6 +2512,7 @@ dependencies = [
 name = "octofhir-sof-cli"
 version = "0.1.0"
 dependencies = [
+ "annotate-snippets",
  "anyhow",
  "clap",
  "octofhir-sof",

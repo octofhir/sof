@@ -17,6 +17,7 @@ octofhir-sof = { workspace = true }
 octofhir-sof-lint = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }
+annotate-snippets = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 sqlx-postgres = { workspace = true }

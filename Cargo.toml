@@ -23,6 +23,7 @@ octofhir-canonical-manager = "0.2.2"
 # CLI
 clap = { version = "4", features = ["derive", "env"] }
 anyhow = "1.0"
+annotate-snippets = "0.11"
 
 # Lint engine (local path deps until all banshee crates publish)
 banshee_hir = { path = "../mold/crates/banshee_hir" }

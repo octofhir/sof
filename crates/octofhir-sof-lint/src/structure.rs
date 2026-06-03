@@ -32,10 +32,13 @@ pub fn validate_structure(view: &ViewDefinition) -> Vec<Finding> {
     }
     for c in &view.constant {
         if !is_sql_name(&c.name) {
-            out.push(err(
-                "FH06",
-                format!("constant name `{}` is not a valid SQL name", c.name),
-            ));
+            out.push(
+                err(
+                    "FH06",
+                    format!("constant name `{}` is not a valid SQL name", c.name),
+                )
+                .at(&c.name),
+            );
         }
     }
 
@@ -45,10 +48,7 @@ pub fn validate_structure(view: &ViewDefinition) -> Vec<Finding> {
     let mut seen = std::collections::HashSet::new();
     for name in &names {
         if !seen.insert(name) {
-            out.push(err(
-                "FH08",
-                format!("column `{name}` is defined more than once"),
-            ));
+            out.push(err("FH08", format!("column `{name}` is defined more than once")).at(name));
         }
     }
     if names.is_empty() {
@@ -90,10 +90,13 @@ fn walk(selects: &[SelectColumn], out: &mut Vec<Finding>) {
 
 fn check_name(col: &Column, out: &mut Vec<Finding>) {
     if !is_sql_name(&col.name) {
-        out.push(err(
-            "FH06",
-            format!("column name `{}` is not a valid SQL name", col.name),
-        ));
+        out.push(
+            err(
+                "FH06",
+                format!("column name `{}` is not a valid SQL name", col.name),
+            )
+            .at(&col.name),
+        );
     }
 }
 
