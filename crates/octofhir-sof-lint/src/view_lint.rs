@@ -158,7 +158,7 @@ fn validate_steps(
     let mut resolvable = true;
     let mut fh04_emitted = false;
 
-    for step in steps {
+    for (i, step) in steps.iter().enumerate() {
         match step {
             Step::Field(f) => {
                 if path.is_empty() && f == resource {
@@ -184,6 +184,12 @@ fn validate_steps(
                         pending_array = provider
                             .jsonb_field_is_array(None, &table, "resource", &refs)
                             == Some(true);
+                        if provider.is_choice_at(resource, &refs)
+                            && !matches!(steps.get(i + 1), Some(Step::OfType))
+                        {
+                            out.push(choice_not_narrowed(f, location));
+                            resolvable = false;
+                        }
                     }
                     None => resolvable = false,
                 }
@@ -207,6 +213,18 @@ fn unknown_field(field: &str, valid: &[String], location: &str) -> Finding {
         msg.push_str(&format!(" — did you mean `{s}`?"));
     }
     Finding::fhir("FH01", Severity::Error, msg).at(location)
+}
+
+fn choice_not_narrowed(field: &str, location: &str) -> Finding {
+    Finding::fhir(
+        "FH02",
+        Severity::Warning,
+        format!(
+            "selects choice element `{field}` without narrowing; add \
+             ofType(<Type>) to pick a concrete type before extracting a value"
+        ),
+    )
+    .at(location)
 }
 
 fn array_navigation(location: &str) -> Finding {
@@ -359,5 +377,53 @@ mod tests {
     fn array_terminal_into_scalar_reports_fh04() {
         let f = lint_view(&view("name", false), &provider());
         assert_eq!(codes(&f), vec!["FH04"]);
+    }
+
+    fn obs_provider() -> FhirSchemaProvider {
+        let obs: FhirSchema = serde_json::from_value(json!({
+            "url": "u", "name": "Observation", "type": "Observation",
+            "kind": "resource", "class": "resource",
+            "elements": {
+                "id": { "type": "id" },
+                "status": { "type": "code" },
+                "value": { "choices": ["valueQuantity", "valueString"] },
+                "valueQuantity": { "type": "Quantity", "choiceOf": "value" },
+                "valueString": { "type": "string", "choiceOf": "value" }
+            }
+        }))
+        .unwrap();
+        FhirSchemaProvider::with_schemas([obs])
+    }
+
+    fn obs_view(path: &str) -> ViewDefinition {
+        ViewDefinition::from_json(&json!({
+            "resource": "Observation",
+            "select": [{ "column": [{ "name": "c", "path": path }] }]
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn choice_terminal_reports_fh02() {
+        let f = lint_view(&obs_view("value"), &obs_provider());
+        assert_eq!(codes(&f), vec!["FH02"]);
+    }
+
+    #[test]
+    fn choice_navigated_reports_fh02() {
+        let f = lint_view(&obs_view("value.unit"), &obs_provider());
+        assert_eq!(codes(&f), vec!["FH02"]);
+    }
+
+    #[test]
+    fn narrowed_choice_is_clean() {
+        let f = lint_view(&obs_view("value.ofType(Quantity)"), &obs_provider());
+        assert!(f.is_empty(), "{f:?}");
+    }
+
+    #[test]
+    fn concrete_choice_field_is_clean() {
+        let f = lint_view(&obs_view("valueString"), &obs_provider());
+        assert!(f.is_empty(), "{f:?}");
     }
 }

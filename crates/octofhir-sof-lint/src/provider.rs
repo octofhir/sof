@@ -129,6 +129,14 @@ impl FhirSchemaProvider {
         None
     }
 
+    /// Whether the element reached by `path` is a polymorphic choice element
+    /// (`value[x]` and friends), i.e. it must be narrowed with `ofType()` before
+    /// a concrete value can be extracted.
+    pub fn is_choice_at(&self, root_type: &str, path: &[&str]) -> bool {
+        self.element_at(root_type, path)
+            .is_some_and(|el| el.choices.is_some())
+    }
+
     /// The set of elements available *at* `path` (i.e. its children, or the
     /// resource's top-level elements when `path` is empty).
     fn elements_at(
