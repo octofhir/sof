@@ -184,6 +184,24 @@ impl Evaluator {
         let for_each = select.for_each.as_deref();
         let for_each_or_null = select.for_each_or_null.as_deref();
 
+        // `repeat` recursively traverses the focus, collecting every node reached
+        // by transitively re-applying the repeat path(s) (preorder, the focus
+        // node itself excluded). %rowIndex tracks position in the flattened list.
+        if !select.repeat.is_empty() {
+            let asts = select
+                .repeat
+                .iter()
+                .map(|p| self.parse(p))
+                .collect::<Result<Vec<_>>>()?;
+            let mut foci = Vec::new();
+            self.repeat_collect(&asts, ctx, &mut foci)?;
+            let mut rows = Vec::new();
+            for (idx, focus) in foci.iter().enumerate() {
+                rows.extend(self.eval_level(select, focus, idx as i64)?);
+            }
+            return Ok(rows);
+        }
+
         if let Some(path) = for_each.or(for_each_or_null) {
             let ast = self.parse(path)?;
             let elements = self.eval_coll(&ast, ctx, rid)?;
@@ -235,13 +253,49 @@ impl Evaluator {
         Ok(combos)
     }
 
-    /// An all-null row for an empty `forEachOrNull`, honouring `%rowIndex` → 0.
+    /// Preorder transitive closure of the `repeat` path(s): apply every path to
+    /// `node`, push each result, then recurse into it. The starting node itself
+    /// is not emitted.
+    fn repeat_collect(
+        &self,
+        paths: &[ExpressionNode],
+        node: &Value,
+        out: &mut Vec<Value>,
+    ) -> Result<()> {
+        for ast in paths {
+            for child in self.eval_coll(ast, node, 0)? {
+                out.push(child.clone());
+                self.repeat_collect(paths, &child, out)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// An all-null row for an empty `forEachOrNull`. Per spec, columns whose path
+    /// is `%rowIndex` are bound to 0 rather than null.
     fn null_row(&self, select: &SelectColumn) -> Map<String, Value> {
         let mut row = Map::new();
-        for (name, _) in self.shape_of(select).unwrap_or_default() {
-            row.insert(name, Value::Null);
-        }
+        self.null_fill(select, &mut row);
         row
+    }
+
+    fn null_fill(&self, select: &SelectColumn, row: &mut Map<String, Value>) {
+        if let Some(columns) = &select.column {
+            for col in columns {
+                let v = if col.path.trim() == "%rowIndex" {
+                    Value::Number(0.into())
+                } else {
+                    Value::Null
+                };
+                row.insert(col.name.clone(), v);
+            }
+        }
+        for nested in &select.select {
+            self.null_fill(nested, row);
+        }
+        if let Some(first) = select.union_all.as_ref().and_then(|b| b.first()) {
+            self.null_fill(first, row);
+        }
     }
 
     fn column_value(&self, col: &Column, ctx: &Value, rid: i64) -> Result<Value> {

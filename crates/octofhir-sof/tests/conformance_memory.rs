@@ -36,20 +36,9 @@ fn sql_on_fhir_conformance_in_memory() {
     }
     report(&outcomes);
 
-    // Ratcheting baseline. The vendored v2.1.0-pre suite (144 cases) introduced
-    // `repeat`, `%rowIndex` and stricter `join`/empty semantics that are being
-    // brought up to spec incrementally; lower this as features land, target 0.
-    const MAX_ALLOWED_FAILURES: usize = 21;
+    // The in-memory evaluator passes the full vendored v2.1.0-pre suite.
     let failed = outcomes.iter().filter(|o| !o.passed).count();
-    assert!(
-        failed <= MAX_ALLOWED_FAILURES,
-        "{failed} in-memory conformance cases failed (baseline {MAX_ALLOWED_FAILURES})"
-    );
-    if failed < MAX_ALLOWED_FAILURES {
-        eprintln!(
-            "conformance improved: {failed} failures < baseline {MAX_ALLOWED_FAILURES} — lower MAX_ALLOWED_FAILURES"
-        );
-    }
+    assert_eq!(failed, 0, "{failed} in-memory conformance cases failed");
 }
 
 struct Outcome {
