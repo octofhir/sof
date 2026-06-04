@@ -56,9 +56,11 @@ impl Lower {
         // it before returning so siblings/unionAll branches inherit correctly.
         let saved_ri = self.row_idx.borrow().clone();
 
-        // forEach / forEachOrNull establish a new focus (and a new %rowIndex) for
-        // this level.
-        let (joins, ctx2): (Vec<String>, String) = if let Some(p) = &select.for_each {
+        // forEach / forEachOrNull / repeat establish a new focus (and a new
+        // %rowIndex) for this level; they are mutually exclusive (sql-expressions).
+        let (joins, ctx2): (Vec<String>, String) = if !select.repeat.is_empty() {
+            self.repeat_join(&select.repeat, prefix, ctx)?
+        } else if let Some(p) = &select.for_each {
             self.for_each_join(p, prefix, ctx, false)?
         } else if let Some(p) = &select.for_each_or_null {
             self.for_each_join(p, prefix, ctx, true)?
@@ -152,6 +154,64 @@ impl Lower {
         };
         *self.row_idx.borrow_mut() = ri;
         Ok((joins, format!("{alias}.value")))
+    }
+
+    /// Lower a `repeat` directive to a lateral, recursive traversal. The recursive
+    /// CTE re-applies the repeat path(s) to every reached node (the focus itself
+    /// excluded). A `pathkey` array of per-level ordinals orders the result in
+    /// preorder, and `%rowIndex` is its 0-based position in that flattened list.
+    fn repeat_join(
+        &self,
+        paths: &[String],
+        prefix: &[String],
+        ctx: &str,
+    ) -> Result<(Vec<String>, String), Error> {
+        let asts = paths
+            .iter()
+            .map(|p| {
+                let s = self.substitute(p)?;
+                parse_ast(&s).map_err(|e| Error::FhirPath(e.to_string()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let n = self.fresh();
+        let cte = format!("_rep{n}");
+        let alias = format!("rep{n}");
+        let base = self.repeat_expand(&asts, ctx)?;
+        let step = self.repeat_expand(&asts, &format!("{cte}.value"))?;
+
+        // The recursive CTE lives inside a LATERAL subquery so its base case can
+        // reference the enclosing focus `ctx`.
+        let lateral = format!(
+            "CROSS JOIN LATERAL (\
+             WITH RECURSIVE {cte}(value, pathkey) AS (\
+             SELECT _b{n}.value, ARRAY[_b{n}.key]::bigint[] FROM ({base}) AS _b{n} \
+             UNION ALL \
+             SELECT _s{n}.value, {cte}.pathkey || _s{n}.key \
+             FROM {cte}, LATERAL ({step}) AS _s{n}) \
+             SELECT value, (row_number() OVER (ORDER BY pathkey) - 1)::bigint AS ridx \
+             FROM {cte}) AS {alias}(value, ridx)"
+        );
+        let mut joins = prefix.to_vec();
+        joins.push(lateral);
+        *self.row_idx.borrow_mut() = format!("{alias}.ridx");
+        Ok((joins, format!("{alias}.value")))
+    }
+
+    /// One traversal step: every node reached by applying each repeat path to
+    /// `ctx`, tagged with an ordering `key` of `path_rank * 1e9 + element_ord` so
+    /// that path order then element order is preserved.
+    fn repeat_expand(&self, asts: &[ExpressionNode], ctx: &str) -> Result<String, Error> {
+        let mut parts = Vec::new();
+        for (i, ast) in asts.iter().enumerate() {
+            let coll = self.coll(ast, ctx)?;
+            let m = self.fresh();
+            parts.push(format!(
+                "SELECT _e{m}.value AS value, ({i}::bigint * 1000000000 + _e{m}.ord) AS key \
+                 FROM jsonb_array_elements({coll}) WITH ORDINALITY AS _e{m}(value, ord)"
+            ));
+        }
+        Ok(parts.join(" UNION ALL "))
     }
 
     fn lower_column(&self, col: &Column, ctx: &str) -> Result<PlanColumn, Error> {

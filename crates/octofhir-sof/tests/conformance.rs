@@ -84,8 +84,10 @@ async fn sql_on_fhir_conformance() {
 
     report(&outcomes);
 
-    // The harness records a baseline; it does not gate the build while the
-    // generator is being brought up to spec. Failure detail is in the report.
+    // The PostgreSQL generator passes the full vendored suite; gate on it when a
+    // database is available (the suite is skipped entirely without one).
+    let failed = outcomes.iter().filter(|o| !o.passed).count();
+    assert_eq!(failed, 0, "{failed} PostgreSQL conformance cases failed");
 }
 
 fn test_cases_dir() -> PathBuf {
