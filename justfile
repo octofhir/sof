@@ -94,6 +94,18 @@ validate view:
 lint-shareable view:
     {{sof}} lint {{view}} --shareable
 
+# Show how ViewDefinitions get linted, over examples/. Steps 1-2 are offline;
+# step 3 installs hl7.fhir.r4.core on first run (needs network once). The `-`
+# prefixes let the tour continue past the non-zero exit lint returns on findings.
+lint-demo:
+    @echo "# 1. Structural validation (offline) — duplicate column => FH08"
+    -{{sof}} validate {{examples}}/invalid_view.json
+    @echo "\n# 2. Shareable subset (offline) — FHIRPath outside the portable subset => FH11"
+    -{{sof}} lint {{examples}}/shareable_violations.json --shareable
+    @echo "\n# 3. Schema lint vs a FHIR package — unknown element / array / Reference => FH01/FH04/FH05"
+    -{{sof}} lint {{examples}}/schema_violations.json --package hl7.fhir.r4.core --version 4.0.1
+    @echo ""
+
 # Run a SQL-on-FHIR test-case file (or directory) in memory.
 test-cases manifest:
     {{sof}} test {{manifest}}

@@ -28,8 +28,37 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
+  # Create the GitHub Release once with a curated body: the matching section of
+  # CHANGELOG.md, followed by the auto-generated commit/PR notes. The binaries
+  # jobs then only attach assets, so the body is set deterministically (no race
+  # across the per-target matrix, and no awk on the Windows runner).
+  release:
+    name: create release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Extract changelog section
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v v="$version" '
+            $0 ~ "^## \\[" v "\\]" {grab=1; next}
+            grab && /^## \[/ {exit}
+            grab {print}
+          ' CHANGELOG.md > release-notes.md
+          if [ ! -s release-notes.md ]; then
+            echo "octofhir-sof $GITHUB_REF_NAME" > release-notes.md
+          fi
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: release-notes.md
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
   binaries:
     name: ${{ matrix.target }}
+    needs: release
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -85,7 +114,6 @@ jobs:
       - name: Upload to release
         uses: softprops/action-gh-release@v2
         with:
-          generate_release_notes: true
           fail_on_unmatched_files: false
           files: |
             octofhir-sof-${{ matrix.target }}.tar.gz

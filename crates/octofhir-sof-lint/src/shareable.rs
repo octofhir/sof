@@ -181,7 +181,10 @@ fn check_function(name: &str, location: &str, allowed: &[String], out: &mut Vec<
     out.push(finding(
         Severity::Error,
         location,
-        format!("`{name}()` is not in the Shareable required FHIRPath subset"),
+        format!(
+            "`{name}()` is outside the ShareableViewDefinition portable FHIRPath \
+             subset — a view using it may not run on other SQL-on-FHIR engines"
+        ),
     ));
 }
 
@@ -222,7 +225,10 @@ fn check_binary(op: &BinaryOperator, location: &str, out: &mut Vec<Finding>) {
     out.push(finding(
         Severity::Error,
         location,
-        format!("operator `{sym}` is not in the Shareable required FHIRPath subset"),
+        format!(
+            "operator `{sym}` is outside the ShareableViewDefinition portable \
+             FHIRPath subset — a view using it may not run on other SQL-on-FHIR engines"
+        ),
     ));
 }
 
