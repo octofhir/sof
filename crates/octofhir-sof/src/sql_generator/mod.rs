@@ -17,6 +17,7 @@ use crate::view_definition::ViewDefinition;
 mod boundary;
 mod constants;
 mod ddl;
+mod dialect;
 mod lower;
 
 pub use ddl::{Dialect, create_table};
@@ -33,6 +34,8 @@ pub struct SqlGenerator {
     /// Optional row-status predicate template; `{base}` is replaced with the
     /// base alias. `None` disables row filtering entirely.
     row_filter: Option<String>,
+    /// SQL dialect for the generated SELECT query.
+    dialect: Dialect,
 }
 
 impl Default for SqlGenerator {
@@ -47,6 +50,7 @@ impl SqlGenerator {
         Self {
             table_pattern: "base".to_string(),
             row_filter: Some("{base}.status <> 'deleted'".to_string()),
+            dialect: Dialect::Postgres,
         }
     }
 
@@ -56,6 +60,13 @@ impl SqlGenerator {
             table_pattern: table_pattern.into(),
             ..Self::new()
         }
+    }
+
+    /// Select the SQL dialect for the generated SELECT query. Defaults to
+    /// [`Dialect::Postgres`]. `Dialect::Ansi` is treated as `Postgres`.
+    pub fn with_dialect(mut self, dialect: Dialect) -> Self {
+        self.dialect = dialect;
+        self
     }
 
     /// Set the row-status predicate. `{base}` is replaced with the base alias.
@@ -81,10 +92,9 @@ impl SqlGenerator {
         }
 
         let constants = build_constants(view)?;
-        let lower = Lower::new(view.resource.clone(), constants);
-
         let table = view.resource.to_lowercase();
         let ctx0 = format!("{}.resource", self.table_pattern);
+        let lower = Lower::new(view.resource.clone(), constants, ctx0.clone(), self.dialect);
 
         // Top-level selects cross-join, exactly like nested selects.
         let mut plans = vec![Plan::empty()];

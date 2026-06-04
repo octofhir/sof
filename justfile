@@ -43,6 +43,11 @@ install:
 conformance:
     cargo test -p octofhir-sof --test conformance_memory -- --nocapture
 
+# Emit our pass/fail result file in the sql-on-fhir.org registry format.
+conformance-report out="conformance-results.json":
+    SOF_RESULT_JSON="{{out}}" cargo test -p octofhir-sof --test conformance_memory -- --nocapture
+    @echo "Result JSON written to {{out}} — see CONFORMANCE.md to submit it."
+
 # Refresh the vendored official content tests from upstream (FHIR/sql-on-fhir.js).
 update-spec-tests:
     #!/usr/bin/env bash
@@ -60,6 +65,10 @@ update-spec-tests:
 # Run the official content tests against PostgreSQL (set SOF_CONFORMANCE_DB).
 conformance-pg db="postgres://postgres:postgres@localhost:55433/conformance":
     SOF_CONFORMANCE_DB="{{db}}" cargo test -p octofhir-sof --test conformance -- --nocapture
+
+# Run the official content tests against DuckDB (requires the `duckdb` CLI).
+conformance-duckdb:
+    cargo test -p octofhir-sof --test conformance_duckdb -- --nocapture
 
 # Start a throwaway PostgreSQL for conformance-pg.
 conformance-db:
@@ -79,6 +88,11 @@ run view input:
 # Validate a ViewDefinition's structure against the spec (offline).
 validate view:
     {{sof}} validate {{view}}
+
+# Check a ViewDefinition against the portable ShareableViewDefinition FHIRPath
+# subset (offline, no package needed).
+lint-shareable view:
+    {{sof}} lint {{view}} --shareable
 
 # Run a SQL-on-FHIR test-case file (or directory) in memory.
 test-cases manifest:

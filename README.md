@@ -43,8 +43,9 @@ cat export/*.ndjson | octofhir-sof run view.json --input - --output ndjson
 # Run every view in a directory in one pass, one output file per view
 octofhir-sof run views/ --input data/ --output csv --out out/
 
-# Generate PostgreSQL for the view
+# Generate SQL for the view (PostgreSQL JSONB by default, or DuckDB JSON)
 octofhir-sof generate view.json
+octofhir-sof generate view.json --dialect duckdb
 
 # Generate a CREATE TABLE for the view's columns (ansi | postgres | duckdb)
 octofhir-sof generate view.json --ddl --dialect postgres
@@ -56,8 +57,13 @@ octofhir-sof run view.json --db postgres://localhost/fhir --output csv
 octofhir-sof validate view.json
 octofhir-sof validate view.json --sarif > results.sarif
 
-# Lint selectors and generated SQL against a FHIR package
+# Lint selectors and generated SQL against a FHIR package (any version)
 octofhir-sof lint view.json --package hl7.fhir.r4.core
+octofhir-sof lint view.json --package hl7.fhir.r5.core --version 5.0.0
+
+# Check a view against the portable ShareableViewDefinition FHIRPath subset
+# (offline, no package). --allow-fn exempts a registered custom function.
+octofhir-sof lint view.json --shareable
 
 # Run the official content-test format in memory
 octofhir-sof test tests/
@@ -93,17 +99,39 @@ for resource in resources {
 }
 ```
 
+## SQL dialects
+
+`generate` emits a PostgreSQL JSONB query by default and a DuckDB JSON query
+with `--dialect duckdb`; both come from one dialect-parametrized generator and
+pass the full content-test suite (DuckDB verified through the `duckdb` CLI). The
+in-memory engine (`run --input`, `execute`) needs no database at all.
+
+## FHIR versions
+
+Execution is **version-agnostic**: the engine navigates the resource JSON and is
+not coupled to any StructureDefinition, so the same view runs unchanged over R4,
+R4B, R5 or R6 resources (the suite includes an R5 `CodeableReference` case). The
+schema-driven lint (`lint --package`) accepts any package the canonical manager
+can resolve — pass the package name and `--version`, e.g. `hl7.fhir.r4.core`,
+`hl7.fhir.r4b.core`, `hl7.fhir.r5.core`, or an R6 build — there is no hard-coded
+version.
+
 ## Conformance
 
 The official reference tests from
 [FHIR/sql-on-fhir.js](https://github.com/FHIR/sql-on-fhir.js) are vendored under
-`crates/octofhir-sof/tests/spec/` (refresh with `just update-spec-tests`). Run
-them:
+`crates/octofhir-sof/tests/spec/` (refresh with `just update-spec-tests`). Both
+execution paths pass the full v2.1 suite (144/144). Run them:
 
 ```sh
 just conformance                 # in-memory (no database)
 just conformance-pg              # against PostgreSQL (needs Docker)
+just conformance-duckdb          # against DuckDB (needs the `duckdb` CLI)
+just conformance-report          # emit a result file for the sql-on-fhir.org registry
 ```
+
+See [CONFORMANCE.md](CONFORMANCE.md) for the result-file format and how to submit
+our entry to the implementation registry.
 
 ## License
 

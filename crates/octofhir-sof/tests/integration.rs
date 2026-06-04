@@ -168,6 +168,30 @@ fn empty_view_is_error() {
 }
 
 #[test]
+fn reference_key_handles_contained_fragment() {
+    // getReferenceKey must resolve a fragment (`#id`) reference into the
+    // resource's contained[]; the SQL strips the `#` and a typed call checks
+    // the contained resourceType. (Row behaviour is asserted by the
+    // contained-resource conformance fixture on both paths.)
+    let g = generate(json!({
+        "resource": "Patient",
+        "select": [{ "column": [
+            { "name": "k", "path": "managingOrganization.getReferenceKey(Organization)", "type": "string" }
+        ] }]
+    }));
+    assert!(
+        g.sql.contains("LIKE '#%'"),
+        "fragment branch missing: {}",
+        g.sql
+    );
+    assert!(
+        g.sql.contains("'contained'"),
+        "contained lookup missing: {}",
+        g.sql
+    );
+}
+
+#[test]
 fn generated_columns_metadata() {
     let g = generate(json!({
         "resource": "Patient",
