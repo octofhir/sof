@@ -4,6 +4,29 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.1.1]
+
+### Changed
+
+- **In-memory execution now supports the full FHIRPath function set.** `run` and
+  `execute` delegate per-expression evaluation to the `octofhir-fhirpath`
+  engine, so functions beyond the SQL-on-FHIR essentials — `substring`, `upper`,
+  `lower`, `length`, math, etc. — work in memory. The library stays
+  network-free (no FHIR ModelProvider; `ofType` is rewritten on the path).
+  SoF semantics (forEach/unionAll/repeat, `%rowIndex`, scalar-vs-collection,
+  contained-resource keys) are preserved.
+- The SQL generation path (`generate`, PostgreSQL/DuckDB) remains a hand-lowered
+  subset and is unchanged: `run` is now intentionally richer than `generate`,
+  which errors clearly on a function it cannot lower to SQL.
+- `execute` and `CompiledView::{compile, execute_resource}` are now `async`; a
+  sync `execute_blocking` is provided for non-async callers.
+
+### Fixed
+
+- `lint` no longer runs the generated SQL through the bundled SQL analyzer,
+  which produced false positives (Rf01/Jb01) against the generator's
+  lateral-join aliases. Findings are reported at the spec level only.
+
 ## [0.1.0]
 
 First release. A pure-Rust [SQL-on-FHIR v2](https://build.fhir.org/ig/FHIR/sql-on-fhir-v2/)
@@ -47,4 +70,5 @@ toolkit: a network-free library plus a thin CLI.
   in-memory and PostgreSQL paths, and on DuckDB through the `duckdb` CLI. See
   [CONFORMANCE.md](CONFORMANCE.md).
 
+[0.1.1]: https://github.com/octofhir/sof/releases/tag/v0.1.1
 [0.1.0]: https://github.com/octofhir/sof/releases/tag/v0.1.0
