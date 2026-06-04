@@ -59,7 +59,8 @@ enum Command {
         view: PathBuf,
 
         /// FHIR resources to run against, with no database: an NDJSON file, a
-        /// Bundle, a JSON resource or array, or a directory of such files.
+        /// Bundle, a JSON resource or array, a directory of such files, or `-`
+        /// to read from stdin.
         #[arg(long, conflicts_with = "db")]
         input: Option<PathBuf>,
 
@@ -146,6 +147,18 @@ fn default_table_name(view: &ViewDefinition) -> String {
 /// Load FHIR resources from a file or a directory of files. Supports NDJSON
 /// (`.ndjson`), single resources, resource arrays, and Bundles.
 fn load_resources(path: &PathBuf) -> Result<Vec<serde_json::Value>> {
+    // `-` reads FHIR resources from stdin (NDJSON or a single JSON value).
+    if path.as_os_str() == "-" {
+        let mut text = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut text)
+            .context("reading FHIR resources from stdin")?;
+        let mut resources = Vec::new();
+        parse_resource_text(&text, &mut resources).context("parsing stdin")?;
+        if resources.is_empty() {
+            anyhow::bail!("no FHIR resources found on stdin");
+        }
+        return Ok(resources);
+    }
     let mut resources = Vec::new();
     if path.is_dir() {
         let mut entries: Vec<PathBuf> = fs::read_dir(path)
@@ -180,6 +193,25 @@ fn load_file(path: &PathBuf, out: &mut Vec<serde_json::Value>) -> Result<()> {
     } else {
         let value: serde_json::Value =
             serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+        push_resource(value, out);
+    }
+    Ok(())
+}
+
+/// Parse resource text of unknown shape: a single JSON value (object, array or
+/// Bundle) if it parses whole, otherwise NDJSON (one JSON value per line). Used
+/// for stdin, where there is no filename extension to disambiguate.
+fn parse_resource_text(text: &str, out: &mut Vec<serde_json::Value>) -> Result<()> {
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(text) {
+        push_resource(value, out);
+        return Ok(());
+    }
+    for (i, line) in text.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let value: serde_json::Value =
+            serde_json::from_str(line).with_context(|| format!("parsing line {}", i + 1))?;
         push_resource(value, out);
     }
     Ok(())
