@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use octofhir_sof::output::get_writer;
-use octofhir_sof::{SqlGenerator, ViewDefinition, ViewRunner};
+use octofhir_sof::{SqlGenerator, ViewDefinition, ViewResult, ViewRunner};
 use octofhir_sof_lint::{FhirSchemaProvider, Severity, lint, validate_structure};
 use sqlx_postgres::PgPool;
 
@@ -55,7 +55,9 @@ enum Command {
     /// Execute a ViewDefinition and write the rows. Runs against FHIR files with
     /// `--input` (no database) or against PostgreSQL with `--db`.
     Run {
-        /// Path to the ViewDefinition JSON file.
+        /// Path to a ViewDefinition JSON file, or a directory of them. A
+        /// directory runs every view in one pass, writing one file per view
+        /// into the --out directory.
         view: PathBuf,
 
         /// FHIR resources to run against, with no database: an NDJSON file, a
@@ -134,6 +136,71 @@ fn load_view(path: &PathBuf) -> Result<ViewDefinition> {
         .with_context(|| format!("reading ViewDefinition {}", path.display()))?;
     ViewDefinition::parse(&text)
         .with_context(|| format!("parsing ViewDefinition {}", path.display()))
+}
+
+/// A resolved data source for `run`, shared across one or many views.
+enum Source {
+    Files(Vec<serde_json::Value>),
+    Db(PgPool),
+}
+
+/// Execute a single view against the resolved source.
+async fn run_view(source: &Source, view: &ViewDefinition) -> Result<ViewResult> {
+    match source {
+        Source::Files(resources) => {
+            octofhir_sof::execute(view, resources).context("executing view")
+        }
+        Source::Db(pool) => ViewRunner::new(pool.clone())
+            .run(view)
+            .await
+            .context("executing view"),
+    }
+}
+
+/// Load one or many ViewDefinitions. A directory yields every `*.json` view
+/// (sorted), keyed by view name (falling back to the file stem); a file yields
+/// a single entry. The key is used as the per-view output filename in multi mode.
+fn load_views(path: &PathBuf) -> Result<Vec<(String, ViewDefinition)>> {
+    if path.is_dir() {
+        let mut files: Vec<PathBuf> = fs::read_dir(path)
+            .with_context(|| format!("reading views directory {}", path.display()))?
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|x| x == "json"))
+            .collect();
+        files.sort();
+        if files.is_empty() {
+            anyhow::bail!("no ViewDefinition (*.json) files in {}", path.display());
+        }
+        let mut views = Vec::new();
+        for file in files {
+            let view = load_view(&file)?;
+            let stem = file
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "view".to_string());
+            let name = view.name.clone().filter(|n| !n.is_empty()).unwrap_or(stem);
+            views.push((name, view));
+        }
+        Ok(views)
+    } else {
+        let view = load_view(path)?;
+        let name = view
+            .name
+            .clone()
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(|| "view".to_string());
+        Ok(vec![(name, view)])
+    }
+}
+
+/// File extension for an output format (used for per-view filenames).
+fn output_extension(format: &str) -> &'static str {
+    match format.to_lowercase().as_str() {
+        "ndjson" => "ndjson",
+        "json" => "json",
+        "parquet" => "parquet",
+        _ => "csv",
+    }
 }
 
 /// The default DDL table name for a view: its `name`, else `<resource>_view`.
@@ -410,36 +477,58 @@ async fn run(cli: Cli, color: bool) -> Result<()> {
             output,
             out,
         } => {
-            let view = load_view(&view)?;
-            let result = match (input, db) {
-                (Some(path), _) => {
-                    let resources = load_resources(&path)?;
-                    octofhir_sof::execute(&view, &resources).context("executing view")?
-                }
-                (None, Some(db)) => {
-                    let pool = PgPool::connect(&db)
+            // A directory of ViewDefinitions runs every view in one pass, writing
+            // one output file per view into the --out directory.
+            let multi = view.is_dir();
+            let views = load_views(&view)?;
+
+            // Acquire the data source once, shared across all views.
+            let source = match (input, db) {
+                (Some(path), _) => Source::Files(load_resources(&path)?),
+                (None, Some(db)) => Source::Db(
+                    PgPool::connect(&db)
                         .await
-                        .with_context(|| format!("connecting to {db}"))?;
-                    ViewRunner::new(pool)
-                        .run(&view)
-                        .await
-                        .context("executing view")?
-                }
+                        .with_context(|| format!("connecting to {db}"))?,
+                ),
                 (None, None) => {
-                    anyhow::bail!("provide --input <file|dir> to run on files, or --db <url>")
+                    anyhow::bail!("provide --input <file|dir|-> to run on files, or --db <url>")
                 }
             };
 
             let writer = get_writer(&output).context("selecting output format")?;
-            let mut sink: Box<dyn Write> = match out {
-                Some(path) => Box::new(
-                    fs::File::create(&path)
-                        .with_context(|| format!("creating {}", path.display()))?,
-                ),
-                None => Box::new(io::stdout().lock()),
-            };
-            writer.write(&result, &mut sink).context("writing output")?;
-            sink.flush().ok();
+
+            if multi {
+                let out_dir =
+                    out.context("--out <dir> is required when running a directory of views")?;
+                fs::create_dir_all(&out_dir)
+                    .with_context(|| format!("creating output directory {}", out_dir.display()))?;
+                let ext = output_extension(&output);
+                for (name, view) in &views {
+                    let result = run_view(&source, view).await?;
+                    let path = out_dir.join(format!("{name}.{ext}"));
+                    let mut sink: Box<dyn Write> = Box::new(
+                        fs::File::create(&path)
+                            .with_context(|| format!("creating {}", path.display()))?,
+                    );
+                    writer
+                        .write(&result, &mut sink)
+                        .with_context(|| format!("writing {}", path.display()))?;
+                    sink.flush().ok();
+                    eprintln!("{} -> {}", name, path.display());
+                }
+            } else {
+                let (_, view) = &views[0];
+                let result = run_view(&source, view).await?;
+                let mut sink: Box<dyn Write> = match out {
+                    Some(path) => Box::new(
+                        fs::File::create(&path)
+                            .with_context(|| format!("creating {}", path.display()))?,
+                    ),
+                    None => Box::new(io::stdout().lock()),
+                };
+                writer.write(&result, &mut sink).context("writing output")?;
+                sink.flush().ok();
+            }
         }
         Command::Validate { view, json } => {
             let origin = view.display().to_string();
