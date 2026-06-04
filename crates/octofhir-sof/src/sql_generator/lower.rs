@@ -26,15 +26,23 @@ pub(super) struct Lower {
     /// level; a `forEach`/`forEachOrNull` sets it to `<alias>.ord - 1` for the
     /// duration of that level (saved/restored around each `build_select`).
     row_idx: std::cell::RefCell<String>,
+    /// SQL expression yielding the root resource JSONB (e.g. `base.resource`).
+    /// Fragment (`#id`) references resolve against its `contained[]`.
+    root: String,
 }
 
 impl Lower {
-    pub(super) fn new(resource_type: String, constants: HashMap<String, String>) -> Self {
+    pub(super) fn new(
+        resource_type: String,
+        constants: HashMap<String, String>,
+        root: String,
+    ) -> Self {
         Self {
             resource_type,
             constants,
             seq: Cell::new(0),
             row_idx: std::cell::RefCell::new("0".to_string()),
+            root,
         }
     }
 
@@ -484,15 +492,37 @@ impl Lower {
         type_arg: Option<&ExpressionNode>,
     ) -> Result<String, Error> {
         let n = self.fresh();
+        let refexpr = format!("_r{n}._e ->> 'reference'");
+        let is_frag = format!("{refexpr} LIKE '#%'");
+        // Fragment (`#id`) references key on the local id (sans `#`), resolved
+        // into the resource's contained[]; relative/absolute references key on
+        // the `Type/id` id segment. Both equal getResourceKey() (the id).
+        let key = format!(
+            "CASE WHEN {is_frag} THEN substring({refexpr} from 2) \
+             ELSE split_part({refexpr}, '/', 2) END"
+        );
         let guard = match type_arg {
             Some(t) => {
                 let ty = self.type_name(t)?.replace('\'', "''");
-                format!(" AND split_part(_r{n}._e ->> 'reference', '/', 1) = '{ty}'")
+                // A contained resource's type is its declared `resourceType`,
+                // falling back to the Reference.type element; a normal
+                // reference's type is its leading path segment.
+                let contained_ty = format!(
+                    "(SELECT _ct._ce ->> 'resourceType' \
+                     FROM jsonb_array_elements(coalesce({root} -> 'contained', '[]'::jsonb)) AS _ct(_ce) \
+                     WHERE _ct._ce ->> 'id' = substring({refexpr} from 2) LIMIT 1)",
+                    root = self.root
+                );
+                format!(
+                    " AND (CASE WHEN {is_frag} \
+                       THEN coalesce({contained_ty}, _r{n}._e ->> 'type') = '{ty}' \
+                       ELSE split_part({refexpr}, '/', 1) = '{ty}' END)"
+                )
             }
             None => String::new(),
         };
         Ok(format!(
-            "(SELECT coalesce(jsonb_agg(to_jsonb(split_part(_r{n}._e ->> 'reference', '/', 2))),'[]'::jsonb) FROM jsonb_array_elements({coll}) AS _r{n}(_e) WHERE _r{n}._e ->> 'reference' IS NOT NULL{guard})"
+            "(SELECT coalesce(jsonb_agg(to_jsonb({key})),'[]'::jsonb) FROM jsonb_array_elements({coll}) AS _r{n}(_e) WHERE {refexpr} IS NOT NULL{guard})"
         ))
     }
 

@@ -81,10 +81,9 @@ impl SqlGenerator {
         }
 
         let constants = build_constants(view)?;
-        let lower = Lower::new(view.resource.clone(), constants);
-
         let table = view.resource.to_lowercase();
         let ctx0 = format!("{}.resource", self.table_pattern);
+        let lower = Lower::new(view.resource.clone(), constants, ctx0.clone());
 
         // Top-level selects cross-join, exactly like nested selects.
         let mut plans = vec![Plan::empty()];

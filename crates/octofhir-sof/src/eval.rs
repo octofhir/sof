@@ -8,6 +8,7 @@
 //! collection behave identically and navigation flattens arrays). The same view
 //! therefore produces the same rows whether run in Postgres or here.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 
 use octofhir_fhirpath::{BinaryOperator, ExpressionNode, LiteralValue, UnaryOperator, parse_ast};
@@ -68,6 +69,7 @@ impl CompiledView {
         let ev = Evaluator {
             resource_type: view.resource.clone(),
             constants,
+            root: RefCell::new(Value::Null),
         };
 
         let shape = ev.shape(&view.select)?;
@@ -124,6 +126,7 @@ impl CompiledView {
         {
             return Ok(Vec::new());
         }
+        self.ev.set_root(resource);
         for ast in &self.where_asts {
             if !self.ev.eval_where(ast, resource)? {
                 return Ok(Vec::new());
@@ -166,12 +169,77 @@ fn cartesian(a: &[Map<String, Value>], b: &[Map<String, Value>]) -> Vec<Map<Stri
 struct Evaluator {
     resource_type: String,
     constants: HashMap<String, String>,
+    /// The resource currently being evaluated. Fragment (`#id`) references
+    /// resolve against its `contained[]`, so getReferenceKey can key contained
+    /// resources as independent resources (per the SQL-on-FHIR functional
+    /// model). Set per resource by [`Evaluator::set_root`].
+    root: RefCell<Value>,
 }
 
 impl Evaluator {
     fn parse(&self, path: &str) -> Result<ExpressionNode> {
         let substituted = substitute_constants(path, &self.constants)?;
         parse_ast(&substituted).map_err(|e| Error::FhirPath(e.to_string()))
+    }
+
+    /// Record the resource being evaluated so fragment references can resolve
+    /// against its `contained[]`.
+    fn set_root(&self, resource: &Value) {
+        *self.root.borrow_mut() = resource.clone();
+    }
+
+    /// The `resourceType` of the contained resource with the given local id, if
+    /// the current root carries it in `contained[]`.
+    fn contained_type(&self, local_id: &str) -> Option<String> {
+        self.root
+            .borrow()
+            .get("contained")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .find(|c| c.get("id").and_then(Value::as_str) == Some(local_id))
+            .and_then(|c| c.get("resourceType").and_then(Value::as_str))
+            .map(str::to_string)
+    }
+
+    /// `getReferenceKey()` on a single Reference value. Relative/absolute
+    /// `Type/id` references key on the id (filtered by the optional expected
+    /// type). Fragment `#id` references resolve into the root resource's
+    /// `contained[]` and key on the local id, so the value matches
+    /// `getResourceKey()` on that contained resource. Absolute URL and `urn:`
+    /// references are not keyed.
+    fn reference_key(&self, item: &Value, want_type: Option<&str>) -> Option<String> {
+        let reference = item.get("reference")?.as_str()?;
+        if let Some(local) = reference.strip_prefix('#') {
+            if local.is_empty() {
+                return None;
+            }
+            // The contained resource's actual type — from its declaration in
+            // contained[], else the Reference.type element. A type filter that
+            // can't be confirmed yields the empty collection.
+            let actual = self
+                .contained_type(local)
+                .or_else(|| item.get("type").and_then(Value::as_str).map(str::to_string));
+            return match (want_type, actual.as_deref()) {
+                (Some(t), Some(a)) if t != a => None,
+                (Some(_), None) => None,
+                _ => Some(local.to_string()),
+            };
+        }
+        if reference.starts_with("urn:") || reference.contains("://") {
+            return None;
+        }
+        let trimmed = reference.trim_start_matches('/');
+        let mut parts = trimmed.split('/');
+        let rtype = parts.next()?;
+        let id = parts.next()?;
+        if id.is_empty() {
+            return None;
+        }
+        match want_type {
+            Some(t) if t != rtype => None,
+            _ => Some(id.to_string()),
+        }
     }
 
     /// The ordered column shape of a select list, validating `unionAll` branch
@@ -512,7 +580,7 @@ impl Evaluator {
                 };
                 Ok(coll
                     .iter()
-                    .filter_map(|item| reference_key(item, want_type.as_deref()))
+                    .filter_map(|item| self.reference_key(item, want_type.as_deref()))
                     .map(Value::String)
                     .collect())
             }
@@ -865,24 +933,6 @@ fn json_cmp(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
         (Value::Number(x), Value::Number(y)) => x.as_f64()?.partial_cmp(&y.as_f64()?),
         (Value::String(x), Value::String(y)) => Some(x.cmp(y)),
         _ => None,
-    }
-}
-
-fn reference_key(item: &Value, want_type: Option<&str>) -> Option<String> {
-    let reference = item.get("reference")?.as_str()?;
-    if reference.starts_with('#') || reference.starts_with("urn:") || reference.contains("://") {
-        return None;
-    }
-    let trimmed = reference.trim_start_matches('/');
-    let mut parts = trimmed.split('/');
-    let rtype = parts.next()?;
-    let id = parts.next()?;
-    if id.is_empty() {
-        return None;
-    }
-    match want_type {
-        Some(t) if t != rtype => None,
-        _ => Some(id.to_string()),
     }
 }
 

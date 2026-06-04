@@ -50,12 +50,18 @@ struct Outcome {
     detail: String,
 }
 
+/// Both DB-backed tests share the `conf` schema and the helper functions, so
+/// they must not run concurrently (`CREATE OR REPLACE FUNCTION` races with
+/// "tuple concurrently updated"). Serialize them.
+static DB_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[tokio::test]
 async fn sql_on_fhir_conformance() {
     let Ok(db_url) = std::env::var("SOF_CONFORMANCE_DB") else {
         eprintln!("SOF_CONFORMANCE_DB not set — skipping SQL-on-FHIR conformance suite");
         return;
     };
+    let _guard = DB_LOCK.lock().await;
 
     let dir = test_cases_dir();
     let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
@@ -88,6 +94,45 @@ async fn sql_on_fhir_conformance() {
     // database is available (the suite is skipped entirely without one).
     let failed = outcomes.iter().filter(|o| !o.passed).count();
     assert_eq!(failed, 0, "{failed} PostgreSQL conformance cases failed");
+}
+
+/// Extra cases not in the official suite (e.g. contained-resource keying),
+/// run against PostgreSQL through the same generator + helper path. Gated on
+/// `SOF_CONFORMANCE_DB` exactly like the main suite.
+#[tokio::test]
+async fn extra_cases() {
+    let Ok(db_url) = std::env::var("SOF_CONFORMANCE_DB") else {
+        eprintln!("SOF_CONFORMANCE_DB not set — skipping extra SQL cases");
+        return;
+    };
+    let _guard = DB_LOCK.lock().await;
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/extra");
+    if !dir.is_dir() {
+        return;
+    }
+    let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display()))
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|x| x == "json"))
+        .collect();
+    files.sort();
+
+    let mut conn = PgConnection::connect(&db_url)
+        .await
+        .expect("connect to SOF_CONFORMANCE_DB");
+    sqlx_core::raw_sql::raw_sql(SETUP_SQL)
+        .execute(&mut conn)
+        .await
+        .expect("install helper functions");
+
+    let mut outcomes = Vec::new();
+    for file in &files {
+        run_file(&mut conn, file, &mut outcomes).await;
+    }
+    report(&outcomes);
+
+    let failed = outcomes.iter().filter(|o| !o.passed).count();
+    assert_eq!(failed, 0, "{failed} extra PostgreSQL cases failed");
 }
 
 fn test_cases_dir() -> PathBuf {

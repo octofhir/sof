@@ -48,6 +48,32 @@ fn sql_on_fhir_conformance_in_memory() {
     assert_eq!(failed, 0, "{failed} in-memory conformance cases failed");
 }
 
+/// Extra cases not in the official suite (e.g. contained-resource keying),
+/// kept in `tests/extra/` so the vendored `tests/spec/` suite stays a clean
+/// mirror of upstream.
+#[test]
+fn extra_cases_in_memory() {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/extra");
+    if !dir.is_dir() {
+        return;
+    }
+    let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display()))
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|x| x == "json"))
+        .collect();
+    files.sort();
+
+    let mut outcomes = Vec::new();
+    for file in &files {
+        run_file(file, &mut outcomes);
+    }
+    report(&outcomes);
+
+    let failed = outcomes.iter().filter(|o| !o.passed).count();
+    assert_eq!(failed, 0, "{failed} extra in-memory cases failed");
+}
+
 struct Outcome {
     file: String,
     title: String,
