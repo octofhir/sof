@@ -11,9 +11,10 @@ homepage = "https://github.com/octofhir/sof"
 authors = ["OctoFHIR Team <funyloony@gmail.com>"]
 
 [workspace.dependencies]
-# Internal
-octofhir-sof = { path = "crates/octofhir-sof" }
-octofhir-sof-lint = { path = "crates/octofhir-sof-lint" }
+# Internal (version is required so dependent crates carry a real requirement
+# when published to crates.io; keep in sync with workspace.package.version)
+octofhir-sof = { path = "crates/octofhir-sof", version = "0.1.0" }
+octofhir-sof-lint = { path = "crates/octofhir-sof-lint", version = "0.1.0" }
 
 # Ecosystem (crates.io)
 octofhir-fhirpath = "0.4.46"
