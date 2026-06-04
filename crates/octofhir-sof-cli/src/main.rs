@@ -30,7 +30,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Generate PostgreSQL from a ViewDefinition (offline, no database). With
+    /// Generate SQL from a ViewDefinition (offline, no database). Emits a
+    /// PostgreSQL SELECT by default; `--dialect duckdb` emits DuckDB SQL. With
     /// `--ddl`, emit a CREATE TABLE for the view's output columns instead.
     Generate {
         /// Path to the ViewDefinition JSON file.
@@ -41,8 +42,9 @@ enum Command {
         #[arg(long)]
         ddl: bool,
 
-        /// DDL type dialect: ansi (spec default), postgres or duckdb. Only used
-        /// with `--ddl`.
+        /// SQL dialect. For `--ddl`: ansi (default, spec types), postgres or
+        /// duckdb. For the SELECT query: postgres (the default) or duckdb (ansi
+        /// is treated as postgres).
         #[arg(long, default_value = "ansi")]
         dialect: String,
 
@@ -550,12 +552,13 @@ async fn run(cli: Cli, color: bool) -> Result<()> {
             table,
         } => {
             let view = load_view(&view)?;
+            let dialect: octofhir_sof::Dialect =
+                dialect.parse().map_err(|e: String| anyhow::anyhow!(e))?;
             let generated = SqlGenerator::new()
+                .with_dialect(dialect)
                 .generate(&view)
                 .context("generating SQL")?;
             if ddl {
-                let dialect: octofhir_sof::Dialect =
-                    dialect.parse().map_err(|e: String| anyhow::anyhow!(e))?;
                 let table = table.unwrap_or_else(|| default_table_name(&view));
                 print!(
                     "{}",

@@ -14,6 +14,7 @@ use super::boundary::{
     BoundaryType, boundary_hint, capitalize_first, date_bound, datetime_bound, time_bound,
 };
 use super::constants::substitute_constants;
+use super::ddl::Dialect;
 use super::{Plan, PlanColumn};
 
 /// The AST→SQL lowering context for a single `generate` call.
@@ -29,6 +30,8 @@ pub(super) struct Lower {
     /// SQL expression yielding the root resource JSONB (e.g. `base.resource`).
     /// Fragment (`#id`) references resolve against its `contained[]`.
     root: String,
+    /// Target SQL dialect for the emitted JSON expressions.
+    dialect: Dialect,
 }
 
 impl Lower {
@@ -36,6 +39,7 @@ impl Lower {
         resource_type: String,
         constants: HashMap<String, String>,
         root: String,
+        dialect: Dialect,
     ) -> Self {
         Self {
             resource_type,
@@ -43,6 +47,7 @@ impl Lower {
             seq: Cell::new(0),
             row_idx: std::cell::RefCell::new("0".to_string()),
             root,
+            dialect,
         }
     }
 
@@ -142,15 +147,13 @@ impl Lower {
         let ast = parse_ast(&path).map_err(|e| Error::FhirPath(e.to_string()))?;
         let coll = self.coll(&ast, ctx)?;
         let alias = format!("fe{}", self.fresh());
-        // WITH ORDINALITY exposes a 1-based position; %rowIndex is 0-based.
+        // WITH ORDINALITY (or DuckDB's zipped unnest) exposes a 1-based
+        // position; %rowIndex is 0-based.
+        let src = self.dialect.elements_ord_table(&coll, &alias);
         let join = if or_null {
-            format!(
-                "LEFT JOIN LATERAL jsonb_array_elements({coll}) WITH ORDINALITY AS {alias}(value, ord) ON true"
-            )
+            format!("LEFT JOIN LATERAL {src} ON true")
         } else {
-            format!(
-                "CROSS JOIN LATERAL jsonb_array_elements({coll}) WITH ORDINALITY AS {alias}(value, ord)"
-            )
+            format!("CROSS JOIN LATERAL {src}")
         };
         let mut joins = prefix.to_vec();
         joins.push(join);
@@ -188,16 +191,33 @@ impl Lower {
         let base = self.repeat_expand(&asts, ctx)?;
         let step = self.repeat_expand(&asts, &format!("{cte}.value"))?;
 
+        let icast = self.dialect.int_cast();
+        // List literal and concat differ: Postgres `ARRAY[k]::bigint[]` / `a || b`;
+        // DuckDB `[k]::BIGINT[]` / `list_concat(a, b)`.
+        let (path0, path_step) = if matches!(self.dialect, Dialect::DuckDb) {
+            (
+                format!("[_b{n}.key]::{icast}[]"),
+                format!("list_concat({cte}.pathkey, [_s{n}.key])"),
+            )
+        } else {
+            (
+                format!("ARRAY[_b{n}.key]::{icast}[]"),
+                format!("{cte}.pathkey || _s{n}.key"),
+            )
+        };
+        // DuckDB cannot alias a CTE's columns with `cte(value, pathkey)` AND it
+        // needs the recursive subquery shaped slightly differently, but the
+        // Postgres form below is also accepted by DuckDB, so share it.
         // The recursive CTE lives inside a LATERAL subquery so its base case can
         // reference the enclosing focus `ctx`.
         let lateral = format!(
             "CROSS JOIN LATERAL (\
              WITH RECURSIVE {cte}(value, pathkey) AS (\
-             SELECT _b{n}.value, ARRAY[_b{n}.key]::bigint[] FROM ({base}) AS _b{n} \
+             SELECT _b{n}.value, {path0} FROM ({base}) AS _b{n} \
              UNION ALL \
-             SELECT _s{n}.value, {cte}.pathkey || _s{n}.key \
+             SELECT _s{n}.value, {path_step} \
              FROM {cte}, LATERAL ({step}) AS _s{n}) \
-             SELECT value, (row_number() OVER (ORDER BY pathkey) - 1)::bigint AS ridx \
+             SELECT value, (row_number() OVER (ORDER BY pathkey) - 1)::{icast} AS ridx \
              FROM {cte}) AS {alias}(value, ridx)"
         );
         let mut joins = prefix.to_vec();
@@ -210,13 +230,16 @@ impl Lower {
     /// `ctx`, tagged with an ordering `key` of `path_rank * 1e9 + element_ord` so
     /// that path order then element order is preserved.
     fn repeat_expand(&self, asts: &[ExpressionNode], ctx: &str) -> Result<String, Error> {
+        let icast = self.dialect.int_cast();
         let mut parts = Vec::new();
         for (i, ast) in asts.iter().enumerate() {
             let coll = self.coll(ast, ctx)?;
             let m = self.fresh();
+            let alias = format!("_e{m}");
+            let src = self.dialect.elements_ord_table(&coll, &alias);
             parts.push(format!(
-                "SELECT _e{m}.value AS value, ({i}::bigint * 1000000000 + _e{m}.ord) AS key \
-                 FROM jsonb_array_elements({coll}) WITH ORDINALITY AS _e{m}(value, ord)"
+                "SELECT {alias}.value AS value, ({i}::{icast} * 1000000000 + {alias}.ord) AS key \
+                 FROM {src}"
             ));
         }
         Ok(parts.join(" UNION ALL "))
@@ -253,38 +276,44 @@ impl Lower {
     /// A collection of more than one element raises an error (the spec's
     /// "expected a single value" case for non-collection columns).
     fn scalar_col(&self, coll: &str, ty: ColumnType) -> String {
+        let txt = self.dialect.scalar_text("_e");
         let inner = match ty {
-            ColumnType::Integer | ColumnType::Integer64 => "(_e #>> '{}')::bigint",
-            ColumnType::Decimal => "(_e #>> '{}')::numeric",
-            ColumnType::Boolean => "(_e #>> '{}')::boolean",
-            ColumnType::Json => "_e",
-            _ => "_e #>> '{}'",
+            ColumnType::Integer | ColumnType::Integer64 => {
+                format!("{txt}::{}", self.dialect.int_cast())
+            }
+            ColumnType::Decimal => format!("{txt}::{}", self.dialect.num_cast()),
+            ColumnType::Boolean => format!("{txt}::{}", self.dialect.bool_cast()),
+            ColumnType::Json => "_e".to_string(),
+            _ => txt,
         };
         let n = self.fresh();
-        format!("(SELECT {inner} FROM jsonb_array_elements({coll}) AS _c{n}(_e))")
+        let src = self.dialect.elements_table(coll, &format!("_c{n}"), "_e");
+        format!("(SELECT {inner} FROM {src})")
     }
 
     // --- Collection lowering: every node evaluates to a JSONB array. ---
 
     fn coll(&self, node: &ExpressionNode, ctx: &str) -> Result<String, Error> {
         match node {
-            ExpressionNode::Literal(l) => Ok(format!(
-                "jsonb_build_array({})",
-                self.literal_jsonb(&l.value)?
-            )),
+            ExpressionNode::Literal(l) => {
+                Ok(self.dialect.build_array1(&self.literal_jsonb(&l.value)?))
+            }
             ExpressionNode::Identifier(n) => {
                 if n.name == self.resource_type {
-                    Ok(format!("jsonb_build_array({ctx})"))
+                    Ok(self.dialect.build_array1(ctx))
                 } else {
-                    Ok(self.nav(&format!("jsonb_build_array({ctx})"), &n.name))
+                    Ok(self.nav(&self.dialect.build_array1(ctx), &n.name))
                 }
             }
             ExpressionNode::Variable(v) => {
                 if v.name == "this" || v.name == "$this" {
-                    Ok(format!("jsonb_build_array({ctx})"))
+                    Ok(self.dialect.build_array1(ctx))
                 } else if v.name == "rowIndex" {
                     let ri = self.row_idx.borrow();
-                    Ok(format!("jsonb_build_array(to_jsonb(({ri})::bigint))"))
+                    let icast = self.dialect.int_cast();
+                    Ok(self
+                        .dialect
+                        .build_array1(&self.dialect.to_json_scalar(&format!("({ri})::{icast}"))))
                 } else {
                     Err(Error::InvalidPath(format!(
                         "unsupported variable ${}",
@@ -311,34 +340,38 @@ impl Lower {
                 let l = self.coll(&u.left, ctx)?;
                 let r = self.coll(&u.right, ctx)?;
                 let n = self.fresh();
+                let la = self.dialect.elements_table(&l, &format!("_ua{n}"), "_v");
+                let ra = self.dialect.elements_table(&r, &format!("_ub{n}"), "_v");
                 Ok(format!(
-                    "(SELECT coalesce(jsonb_agg(_v),'[]'::jsonb) FROM (SELECT _v FROM jsonb_array_elements({l}) AS _ua{n}(_v) UNION ALL SELECT _v FROM jsonb_array_elements({r}) AS _ub{n}(_v)) AS _uu{n})"
+                    "(SELECT {} FROM (SELECT _v FROM {la} UNION ALL SELECT _v FROM {ra}) AS _uu{n})",
+                    self.dialect.agg("_v")
                 ))
             }
             ExpressionNode::Parenthesized(e) => self.coll(e, ctx),
             ExpressionNode::TypeCast(c) => self.coll(&c.expression, ctx),
-            ExpressionNode::BinaryOperation(_) | ExpressionNode::UnaryOperation(_) => Ok(format!(
-                "jsonb_build_array({})",
-                self.value_jsonb(node, ctx)?
-            )),
+            ExpressionNode::BinaryOperation(_) | ExpressionNode::UnaryOperation(_) => {
+                Ok(self.dialect.build_array1(&self.value_jsonb(node, ctx)?))
+            }
             ExpressionNode::Collection(c) => {
                 let mut parts = Vec::new();
                 for e in &c.elements {
                     parts.push(self.coll(e, ctx)?);
                 }
                 if parts.is_empty() {
-                    return Ok("'[]'::jsonb".to_string());
+                    return Ok(self.dialect.empty_array().to_string());
                 }
                 let n = self.fresh();
                 let froms: Vec<String> = parts
                     .iter()
                     .enumerate()
                     .map(|(i, p)| {
-                        format!("SELECT _v FROM jsonb_array_elements({p}) AS _cl{n}_{i}(_v)")
+                        let src = self.dialect.elements_table(p, &format!("_cl{n}_{i}"), "_v");
+                        format!("SELECT _v FROM {src}")
                     })
                     .collect();
                 Ok(format!(
-                    "(SELECT coalesce(jsonb_agg(_v),'[]'::jsonb) FROM ({}) AS _clu{n})",
+                    "(SELECT {} FROM ({}) AS _clu{n})",
+                    self.dialect.agg("_v"),
                     froms.join(" UNION ALL ")
                 ))
             }
@@ -353,28 +386,64 @@ impl Lower {
     /// take `item->prop`, unwrapping arrays into the result.
     fn nav(&self, coll: &str, prop: &str) -> String {
         let p = prop.replace('\'', "''");
-        format!(
-            "(SELECT coalesce(jsonb_agg(_v),'[]'::jsonb) \
-             FROM jsonb_array_elements({coll}) AS _i(_item) \
-             CROSS JOIN LATERAL jsonb_array_elements(\
-               CASE \
-                 WHEN jsonb_typeof(_item -> '{p}') = 'array' THEN _item -> '{p}' \
-                 WHEN _item -> '{p}' IS NULL THEN '[]'::jsonb \
-                 WHEN jsonb_typeof(_item -> '{p}') = 'null' THEN '[]'::jsonb \
-                 ELSE jsonb_build_array(_item -> '{p}') \
-               END) AS _j(_v))"
-        )
+        let n = self.fresh();
+        if matches!(self.dialect, Dialect::DuckDb) {
+            // A 3-branch CASE with an empty `[]::JSON[]` middle branch fails to
+            // type-check in DuckDB; use a 2-branch CASE and filter NULL/JSON-null
+            // in the outer WHERE instead.
+            let item = format!("_item{n}");
+            let v = format!("_v{n}");
+            let outer = self.dialect.elements_table(coll, &format!("_i{n}"), &item);
+            let is_arr = self.dialect.is_array(&format!("{item} -> '{p}'"));
+            let not_null = self.dialect.is_json_null(&v);
+            format!(
+                "(SELECT {agg} FROM (\
+                   SELECT unnest(CASE \
+                     WHEN {is_arr} THEN json_extract({item}, '$.{p}[*]') \
+                     ELSE [{item} -> '{p}'] \
+                   END) AS {v} \
+                   FROM {outer} \
+                 ) AS _nav{n} WHERE {v} IS NOT NULL AND NOT ({not_null}))",
+                agg = self.dialect.agg(&v),
+            )
+        } else {
+            let item = "_item";
+            let inner = format!(
+                "CASE \
+                   WHEN {is_arr} THEN {item} -> '{p}' \
+                   WHEN {item} -> '{p}' IS NULL THEN {empty} \
+                   WHEN {is_null} THEN {empty} \
+                   ELSE {one} \
+                 END",
+                is_arr = self.dialect.is_array(&format!("{item} -> '{p}'")),
+                is_null = self.dialect.is_json_null(&format!("{item} -> '{p}'")),
+                empty = self.dialect.empty_array(),
+                one = self.dialect.build_array1(&format!("{item} -> '{p}'")),
+            );
+            let outer = self.dialect.elements_table(coll, "_i", item);
+            format!(
+                "(SELECT {agg} \
+                 FROM {outer} \
+                 CROSS JOIN LATERAL jsonb_array_elements({inner}) AS _j(_v))",
+                agg = self.dialect.agg("_v"),
+            )
+        }
     }
 
     fn index(&self, coll: &str, n: i64) -> String {
+        // Parenthesise the `->` access: DuckDB binds `->` looser than `IS NULL`,
+        // so `x -> n IS NULL` would parse as `x -> (n IS NULL)`.
+        let at = format!("(({coll}) -> {n})");
         format!(
-            "(CASE WHEN ({coll}) -> {n} IS NULL THEN '[]'::jsonb ELSE jsonb_build_array(({coll}) -> {n}) END)"
+            "(CASE WHEN {at} IS NULL THEN {empty} ELSE {one} END)",
+            empty = self.dialect.empty_array(),
+            one = self.dialect.build_array1(&at),
         )
     }
 
     /// A function applied to the current context (`name(...)` with no object).
     fn func_root(&self, name: &str, args: &[ExpressionNode], ctx: &str) -> Result<String, Error> {
-        let seed = format!("jsonb_build_array({ctx})");
+        let seed = self.dialect.build_array1(ctx);
         self.apply_on_coll(name, &seed, args, ctx)
     }
 
@@ -388,9 +457,10 @@ impl Lower {
     ) -> Result<String, Error> {
         match name {
             "ofType" => self.of_type(object, args.first(), ctx),
-            "not" => Ok(format!(
-                "jsonb_build_array(to_jsonb(NOT ({})))",
-                self.bool(object, ctx)?
+            "not" => Ok(self.dialect.build_array1(
+                &self
+                    .dialect
+                    .to_json_scalar(&format!("NOT ({})", self.bool(object, ctx)?)),
             )),
             "lowBoundary" | "highBoundary" => {
                 let hint = boundary_hint(object);
@@ -426,15 +496,21 @@ impl Lower {
                     Some(cond) => self.where_fn(coll, cond)?,
                     None => coll.to_string(),
                 };
-                Ok(format!(
-                    "jsonb_build_array(to_jsonb(jsonb_array_length({base}) > 0))"
+                Ok(self.dialect.build_array1(
+                    &self
+                        .dialect
+                        .to_json_scalar(&format!("{} > 0", self.dialect.array_length(&base))),
                 ))
             }
-            "empty" => Ok(format!(
-                "jsonb_build_array(to_jsonb(jsonb_array_length({coll}) = 0))"
+            "empty" => Ok(self.dialect.build_array1(
+                &self
+                    .dialect
+                    .to_json_scalar(&format!("{} = 0", self.dialect.array_length(coll))),
             )),
-            "count" => Ok(format!(
-                "jsonb_build_array(to_jsonb(jsonb_array_length({coll})))"
+            "count" => Ok(self.dialect.build_array1(
+                &self
+                    .dialect
+                    .to_json_scalar(&self.dialect.array_length(coll)),
             )),
             "join" => self.join_fn(coll, args),
             "extension" => {
@@ -457,8 +533,10 @@ impl Lower {
         let n = self.fresh();
         let item = format!("_w{n}._it");
         let pred = self.bool(cond, &item)?;
+        let src = self.dialect.elements_table(coll, &format!("_w{n}"), "_it");
         Ok(format!(
-            "(SELECT coalesce(jsonb_agg(_w{n}._it),'[]'::jsonb) FROM jsonb_array_elements({coll}) AS _w{n}(_it) WHERE {pred})"
+            "(SELECT {} FROM {src} WHERE {pred})",
+            self.dialect.agg(&format!("_w{n}._it")),
         ))
     }
 
@@ -468,12 +546,18 @@ impl Lower {
             None => String::new(),
         };
         let n = self.fresh();
+        let src = self.dialect.elements_table(coll, &format!("_jn{n}"), "_e");
+        let joined = self
+            .dialect
+            .build_array1(&self.dialect.to_json_scalar(&format!(
+                "string_agg({}, '{sep}')",
+                self.dialect.scalar_text("_e")
+            )));
         // join() over an empty collection yields the empty collection (null),
         // not an empty string. (FHIR/sql-on-fhir.js fn_join)
         Ok(format!(
-            "(SELECT CASE WHEN count(*) = 0 THEN '[]'::jsonb \
-             ELSE jsonb_build_array(to_jsonb(string_agg(_e #>> '{{}}', '{sep}'))) END \
-             FROM jsonb_array_elements({coll}) AS _jn{n}(_e))"
+            "(SELECT CASE WHEN count(*) = 0 THEN {empty} ELSE {joined} END FROM {src})",
+            empty = self.dialect.empty_array(),
         ))
     }
 
@@ -481,8 +565,12 @@ impl Lower {
         let nav_ext = self.nav(coll, "extension");
         let n = self.fresh();
         let url = url.replace('\'', "''");
+        let src = self
+            .dialect
+            .elements_table(&nav_ext, &format!("_x{n}"), "_e");
         Ok(format!(
-            "(SELECT coalesce(jsonb_agg(_x{n}._e),'[]'::jsonb) FROM jsonb_array_elements({nav_ext}) AS _x{n}(_e) WHERE _x{n}._e ->> 'url' = '{url}')"
+            "(SELECT {agg} FROM {src} WHERE _x{n}._e ->> 'url' = '{url}')",
+            agg = self.dialect.agg(&format!("_x{n}._e")),
         ))
     }
 
@@ -507,11 +595,19 @@ impl Lower {
                 // A contained resource's type is its declared `resourceType`,
                 // falling back to the Reference.type element; a normal
                 // reference's type is its leading path segment.
+                let contained_src = self.dialect.elements_table(
+                    &format!(
+                        "coalesce({root} -> 'contained', {empty})",
+                        root = self.root,
+                        empty = self.dialect.empty_array()
+                    ),
+                    "_ct",
+                    "_ce",
+                );
                 let contained_ty = format!(
                     "(SELECT _ct._ce ->> 'resourceType' \
-                     FROM jsonb_array_elements(coalesce({root} -> 'contained', '[]'::jsonb)) AS _ct(_ce) \
-                     WHERE _ct._ce ->> 'id' = substring({refexpr} from 2) LIMIT 1)",
-                    root = self.root
+                     FROM {contained_src} \
+                     WHERE _ct._ce ->> 'id' = substring({refexpr} from 2) LIMIT 1)"
                 );
                 format!(
                     " AND (CASE WHEN {is_frag} \
@@ -521,15 +617,19 @@ impl Lower {
             }
             None => String::new(),
         };
+        let src = self.dialect.elements_table(coll, &format!("_r{n}"), "_e");
         Ok(format!(
-            "(SELECT coalesce(jsonb_agg(to_jsonb({key})),'[]'::jsonb) FROM jsonb_array_elements({coll}) AS _r{n}(_e) WHERE {refexpr} IS NOT NULL{guard})"
+            "(SELECT {agg} FROM {src} WHERE {refexpr} IS NOT NULL{guard})",
+            agg = self.dialect.agg(&self.dialect.to_json_scalar(&key)),
         ))
     }
 
     fn resource_key(&self, coll: &str) -> Result<String, Error> {
         let n = self.fresh();
+        let src = self.dialect.elements_table(coll, &format!("_k{n}"), "_e");
         Ok(format!(
-            "(SELECT coalesce(jsonb_agg(_k{n}._e -> 'id'),'[]'::jsonb) FROM jsonb_array_elements({coll}) AS _k{n}(_e))"
+            "(SELECT {agg} FROM {src})",
+            agg = self.dialect.agg(&format!("_k{n}._e -> 'id'")),
         ))
     }
 
@@ -540,27 +640,32 @@ impl Lower {
         let sign = if low { "-" } else { "+" };
         let n = self.fresh();
         let e = format!("_b{n}._e");
-        let t = format!("({e} #>> '{{}}')");
+        let t = self.dialect.scalar_text(&e);
+        let num = self.dialect.num_cast();
         let numeric = format!(
-            "(({t})::numeric {sign} (0.5 / power(10, coalesce(length(nullif(split_part({t}, '.', 2), '')), 0))::numeric))"
+            "(({t})::{num} {sign} (0.5 / power(10, coalesce(length(nullif(split_part({t}, '.', 2), '')), 0))::{num}))"
         );
+        let d = self.dialect;
         let string_bound = match hint {
-            BoundaryType::Date => date_bound(&t, low),
-            BoundaryType::DateTime => datetime_bound(&t, low),
-            BoundaryType::Time => time_bound(&t, low),
+            BoundaryType::Date => date_bound(d, &t, low),
+            BoundaryType::DateTime => datetime_bound(d, &t, low),
+            BoundaryType::Time => time_bound(d, &t, low),
             BoundaryType::Unknown => format!(
                 "CASE WHEN position(':' in {t}) > 0 THEN {} ELSE {} END",
-                time_bound(&t, low),
-                date_bound(&t, low)
+                time_bound(d, &t, low),
+                date_bound(d, &t, low)
             ),
         };
+        let src = self.dialect.elements_table(coll, &format!("_b{n}"), "_e");
         format!(
-            "(SELECT coalesce(jsonb_agg(\
-               CASE jsonb_typeof({e}) \
-                 WHEN 'number' THEN to_jsonb({numeric}) \
-                 WHEN 'string' THEN to_jsonb({string_bound}) \
-                 ELSE {e} END),'[]'::jsonb) \
-             FROM jsonb_array_elements({coll}) AS _b{n}(_e))"
+            "(SELECT {agg} FROM {src})",
+            agg = self.dialect.agg(&format!(
+                "CASE WHEN {is_num} THEN {num_j} WHEN {is_str} THEN {str_j} ELSE {e} END",
+                is_num = self.dialect.is_number(&e),
+                num_j = self.dialect.to_json_scalar(&numeric),
+                is_str = self.dialect.is_string(&e),
+                str_j = self.dialect.to_json_scalar(&string_bound),
+            )),
         )
     }
 
@@ -580,7 +685,7 @@ impl Lower {
                 Ok(self.nav(&base, &format!("{}{}", p.property, tname)))
             }
             ExpressionNode::Identifier(idn) if idn.name != self.resource_type => Ok(self.nav(
-                &format!("jsonb_build_array({ctx})"),
+                &self.dialect.build_array1(ctx),
                 &format!("{}{}", idn.name, tname),
             )),
             ExpressionNode::Parenthesized(e) => self.of_type(e, type_arg, ctx),
@@ -599,27 +704,19 @@ impl Lower {
             ExpressionNode::BinaryOperation(b) => self.bool_binop(b, item),
             ExpressionNode::Literal(l) => match &l.value {
                 LiteralValue::Boolean(v) => Ok(v.to_string()),
-                _ => Ok(format!(
-                    "({} #>> '{{}}')::boolean",
-                    self.scalar_jsonb(node, item)?
-                )),
+                _ => self.scalar_bool(node, item),
             },
-            ExpressionNode::MethodCall(m) => match m.method.as_str() {
-                "exists" | "empty" | "not" | "first" | "last" | "where" | "count" | "ofType"
-                | "extension" | "getReferenceKey" | "getResourceKey" => Ok(format!(
-                    "({} #>> '{{}}')::boolean",
-                    self.scalar_jsonb(node, item)?
-                )),
-                _ => Ok(format!(
-                    "({} #>> '{{}}')::boolean",
-                    self.scalar_jsonb(node, item)?
-                )),
-            },
-            _ => Ok(format!(
-                "({} #>> '{{}}')::boolean",
-                self.scalar_jsonb(node, item)?
-            )),
+            _ => self.scalar_bool(node, item),
         }
+    }
+
+    /// Extract the singleton of `node` as text and cast to a SQL boolean.
+    fn scalar_bool(&self, node: &ExpressionNode, item: &str) -> Result<String, Error> {
+        Ok(format!(
+            "{}::{}",
+            self.dialect.scalar_text(&self.scalar_jsonb(node, item)?),
+            self.dialect.bool_cast()
+        ))
     }
 
     fn bool_binop(
@@ -690,9 +787,8 @@ impl Lower {
         }
         let coll = self.coll(node, item)?;
         let n = self.fresh();
-        Ok(format!(
-            "(SELECT _s FROM jsonb_array_elements({coll}) AS _sq{n}(_s))"
-        ))
+        let src = self.dialect.elements_table(&coll, &format!("_sq{n}"), "_s");
+        Ok(format!("(SELECT _s FROM {src})"))
     }
 
     /// A JSONB value for a binary/unary expression used as a column value.
@@ -700,12 +796,22 @@ impl Lower {
         match node {
             ExpressionNode::BinaryOperation(b) => {
                 use BinaryOperator::*;
-                let arith = |g: &Self, op: &str| -> Result<String, Error> {
+                let num = self.dialect.num_cast();
+                let lnum = |g: &Self| -> Result<String, Error> {
                     Ok(format!(
-                        "to_jsonb(({} #>> '{{}}')::numeric {op} ({} #>> '{{}}')::numeric)",
-                        g.scalar_jsonb(&b.left, item)?,
-                        g.scalar_jsonb(&b.right, item)?
+                        "{}::{num}",
+                        g.dialect.scalar_text(&g.scalar_jsonb(&b.left, item)?)
                     ))
+                };
+                let rnum = |g: &Self| -> Result<String, Error> {
+                    Ok(format!(
+                        "{}::{num}",
+                        g.dialect.scalar_text(&g.scalar_jsonb(&b.right, item)?)
+                    ))
+                };
+                let arith = |g: &Self, op: &str| -> Result<String, Error> {
+                    Ok(g.dialect
+                        .to_json_scalar(&format!("{} {op} {}", lnum(g)?, rnum(g)?)))
                 };
                 match b.operator {
                     Add => arith(self, "+"),
@@ -713,48 +819,55 @@ impl Lower {
                     Multiply => arith(self, "*"),
                     Divide => arith(self, "/"),
                     Modulo => arith(self, "%"),
-                    IntegerDivide => Ok(format!(
-                        "to_jsonb(div(({} #>> '{{}}')::numeric, ({} #>> '{{}}')::numeric))",
-                        self.scalar_jsonb(&b.left, item)?,
-                        self.scalar_jsonb(&b.right, item)?
-                    )),
-                    Concatenate => Ok(format!(
-                        "to_jsonb(({} #>> '{{}}') || ({} #>> '{{}}'))",
-                        self.scalar_jsonb(&b.left, item)?,
-                        self.scalar_jsonb(&b.right, item)?
-                    )),
-                    _ => Ok(format!("to_jsonb({})", self.bool(node, item)?)),
+                    IntegerDivide => Ok(self.dialect.to_json_scalar(&format!(
+                        "trunc({} / {})",
+                        lnum(self)?,
+                        rnum(self)?
+                    ))),
+                    Concatenate => Ok(self.dialect.to_json_scalar(&format!(
+                        "{} || {}",
+                        self.dialect.scalar_text(&self.scalar_jsonb(&b.left, item)?),
+                        self.dialect
+                            .scalar_text(&self.scalar_jsonb(&b.right, item)?)
+                    ))),
+                    _ => Ok(self.dialect.to_json_scalar(&self.bool(node, item)?)),
                 }
             }
             ExpressionNode::UnaryOperation(u) => match u.operator {
-                UnaryOperator::Not => Ok(format!("to_jsonb({})", self.bool(node, item)?)),
-                UnaryOperator::Negate => Ok(format!(
-                    "to_jsonb(- ({} #>> '{{}}')::numeric)",
-                    self.scalar_jsonb(&u.operand, item)?
-                )),
-                UnaryOperator::Positive => Ok(format!(
-                    "to_jsonb(({} #>> '{{}}')::numeric)",
-                    self.scalar_jsonb(&u.operand, item)?
-                )),
+                UnaryOperator::Not => Ok(self.dialect.to_json_scalar(&self.bool(node, item)?)),
+                UnaryOperator::Negate => Ok(self.dialect.to_json_scalar(&format!(
+                    "- {}::{}",
+                    self.dialect
+                        .scalar_text(&self.scalar_jsonb(&u.operand, item)?),
+                    self.dialect.num_cast()
+                ))),
+                UnaryOperator::Positive => Ok(self.dialect.to_json_scalar(&format!(
+                    "{}::{}",
+                    self.dialect
+                        .scalar_text(&self.scalar_jsonb(&u.operand, item)?),
+                    self.dialect.num_cast()
+                ))),
             },
-            _ => Ok(format!("to_jsonb({})", self.bool(node, item)?)),
+            _ => Ok(self.dialect.to_json_scalar(&self.bool(node, item)?)),
         }
     }
 
     fn literal_jsonb(&self, v: &LiteralValue) -> Result<String, Error> {
+        let txt = self.dialect.text_cast();
+        let num = self.dialect.num_cast();
+        let int = self.dialect.int_cast();
+        let j = |x: &str| self.dialect.to_json_scalar(x);
         Ok(match v {
-            LiteralValue::String(s) => format!("to_jsonb('{}'::text)", s.replace('\'', "''")),
-            LiteralValue::Integer(i) | LiteralValue::Long(i) => {
-                format!("to_jsonb({i}::bigint)")
-            }
-            LiteralValue::Decimal(d) => format!("to_jsonb({d}::numeric)"),
-            LiteralValue::Boolean(b) => format!("to_jsonb({b})"),
+            LiteralValue::String(s) => j(&format!("'{}'::{txt}", s.replace('\'', "''"))),
+            LiteralValue::Integer(i) | LiteralValue::Long(i) => j(&format!("{i}::{int}")),
+            LiteralValue::Decimal(d) => j(&format!("{d}::{num}")),
+            LiteralValue::Boolean(b) => j(&b.to_string()),
             LiteralValue::Date(_) | LiteralValue::DateTime(_) | LiteralValue::Time(_) => {
                 let s = v.to_string();
                 let s = s.trim_start_matches('@');
-                format!("to_jsonb('{}'::text)", s.replace('\'', "''"))
+                j(&format!("'{}'::{txt}", s.replace('\'', "''")))
             }
-            LiteralValue::Quantity { value, .. } => format!("to_jsonb({value}::numeric)"),
+            LiteralValue::Quantity { value, .. } => j(&format!("{value}::{num}")),
         })
     }
 

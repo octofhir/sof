@@ -66,6 +66,10 @@ update-spec-tests:
 conformance-pg db="postgres://postgres:postgres@localhost:55433/conformance":
     SOF_CONFORMANCE_DB="{{db}}" cargo test -p octofhir-sof --test conformance -- --nocapture
 
+# Run the official content tests against DuckDB (requires the `duckdb` CLI).
+conformance-duckdb:
+    cargo test -p octofhir-sof --test conformance_duckdb -- --nocapture
+
 # Start a throwaway PostgreSQL for conformance-pg.
 conformance-db:
     docker run -d --name sof-conformance -e POSTGRES_PASSWORD=postgres \
