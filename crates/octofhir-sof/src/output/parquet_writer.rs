@@ -73,7 +73,7 @@ impl ParquetWriter {
     /// Convert a column type to an Arrow data type.
     fn column_to_arrow_type(col_type: ColumnType) -> DataType {
         match col_type {
-            ColumnType::Integer => DataType::Int64,
+            ColumnType::Integer | ColumnType::Integer64 => DataType::Int64,
             ColumnType::Decimal => DataType::Float64,
             ColumnType::Boolean => DataType::Boolean,
             // All other types are stored as strings
@@ -116,7 +116,7 @@ impl ParquetWriter {
     /// Convert JSON values to an Arrow array.
     fn values_to_array(col_type: ColumnType, values: &[Option<&Value>]) -> Result<ArrayRef> {
         match col_type {
-            ColumnType::Integer => {
+            ColumnType::Integer | ColumnType::Integer64 => {
                 let arr: Int64Array = values.iter().map(|v| v.and_then(|v| v.as_i64())).collect();
                 Ok(Arc::new(arr))
             }

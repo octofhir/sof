@@ -53,8 +53,11 @@ pub enum ColumnType {
     #[default]
     String,
 
-    /// Integer values.
+    /// Integer values (FHIR `integer`, `positiveInt`, `unsignedInt`).
     Integer,
+
+    /// 64-bit integer values (FHIR `integer64`).
+    Integer64,
 
     /// Decimal/floating-point values.
     Decimal,
@@ -89,7 +92,8 @@ impl ColumnType {
         match type_str.to_lowercase().as_str() {
             "string" | "code" | "uri" | "url" | "canonical" | "id" | "oid" | "uuid"
             | "markdown" => Self::String,
-            "integer" | "positiveint" | "unsignedint" | "integer64" => Self::Integer,
+            "integer" | "positiveint" | "unsignedint" => Self::Integer,
+            "integer64" => Self::Integer64,
             "decimal" => Self::Decimal,
             "boolean" => Self::Boolean,
             "date" => Self::Date,
@@ -101,11 +105,30 @@ impl ColumnType {
         }
     }
 
-    /// Get the SQL type name for this column type (PostgreSQL).
+    /// Parse a column type from an ANSI SQL type name, as supplied by an
+    /// `ansi/type` column tag overriding the inferred type. Unknown names fall
+    /// back to `String`.
+    pub fn from_ansi_type(type_str: &str) -> Self {
+        let t = type_str.trim().to_lowercase();
+        match t.as_str() {
+            "int" | "integer" | "smallint" => Self::Integer,
+            "bigint" => Self::Integer64,
+            "decimal" | "numeric" | "real" | "double precision" | "float" => Self::Decimal,
+            "boolean" | "bool" => Self::Boolean,
+            "timestamp with time zone" | "timestamptz" => Self::Instant,
+            "binary" | "varbinary" | "bytea" => Self::Base64Binary,
+            "json" | "jsonb" => Self::Json,
+            _ => Self::String,
+        }
+    }
+
+    /// Get the PostgreSQL type name for this column type. Used for the runtime
+    /// value cast/decode; this is a Postgres dialect, not the ANSI default.
     pub fn sql_type(&self) -> &'static str {
         match self {
             Self::String => "TEXT",
-            Self::Integer => "BIGINT",
+            Self::Integer => "INTEGER",
+            Self::Integer64 => "BIGINT",
             Self::Decimal => "NUMERIC",
             Self::Boolean => "BOOLEAN",
             Self::Date => "DATE",
@@ -113,6 +136,27 @@ impl ColumnType {
             Self::Time => "TIME",
             Self::Base64Binary => "BYTEA",
             Self::Json => "JSONB",
+        }
+    }
+
+    /// The default ANSI SQL (ISO/IEC 9075) type per the SQL-on-FHIR v2 spec's
+    /// type-mapping table. Temporal and decimal types map to `CHARACTER VARYING`
+    /// to preserve the FHIR string representation; `instant` keeps timezone.
+    /// <https://build.fhir.org/ig/FHIR/sql-on-fhir-v2/StructureDefinition-ViewDefinition-notes.html>
+    pub fn ansi_type(&self) -> &'static str {
+        match self {
+            // string, code, uri, url, canonical, id, oid, uuid, markdown,
+            // date, dateTime, decimal, time
+            Self::String | Self::Decimal | Self::Date | Self::DateTime | Self::Time => {
+                "CHARACTER VARYING"
+            }
+            Self::Integer => "INT",
+            Self::Integer64 => "BIGINT",
+            Self::Boolean => "BOOLEAN",
+            Self::Instant => "TIMESTAMP WITH TIME ZONE",
+            Self::Base64Binary => "BINARY",
+            // JSON has no ANSI equivalent; collection columns are emitted as JSON.
+            Self::Json => "JSON",
         }
     }
 
@@ -127,6 +171,7 @@ impl std::fmt::Display for ColumnType {
         match self {
             Self::String => write!(f, "string"),
             Self::Integer => write!(f, "integer"),
+            Self::Integer64 => write!(f, "integer64"),
             Self::Decimal => write!(f, "decimal"),
             Self::Boolean => write!(f, "boolean"),
             Self::Date => write!(f, "date"),
@@ -172,12 +217,39 @@ mod tests {
     #[test]
     fn test_column_type_sql_type() {
         assert_eq!(ColumnType::String.sql_type(), "TEXT");
-        assert_eq!(ColumnType::Integer.sql_type(), "BIGINT");
+        assert_eq!(ColumnType::Integer.sql_type(), "INTEGER");
+        assert_eq!(ColumnType::Integer64.sql_type(), "BIGINT");
         assert_eq!(ColumnType::Decimal.sql_type(), "NUMERIC");
         assert_eq!(ColumnType::Boolean.sql_type(), "BOOLEAN");
         assert_eq!(ColumnType::Date.sql_type(), "DATE");
         assert_eq!(ColumnType::DateTime.sql_type(), "TIMESTAMPTZ");
         assert_eq!(ColumnType::Json.sql_type(), "JSONB");
+    }
+
+    #[test]
+    fn test_column_type_ansi_type() {
+        // Spec default ANSI mapping: temporal/decimal stay CHARACTER VARYING.
+        assert_eq!(ColumnType::String.ansi_type(), "CHARACTER VARYING");
+        assert_eq!(ColumnType::Decimal.ansi_type(), "CHARACTER VARYING");
+        assert_eq!(ColumnType::Date.ansi_type(), "CHARACTER VARYING");
+        assert_eq!(ColumnType::DateTime.ansi_type(), "CHARACTER VARYING");
+        assert_eq!(ColumnType::Time.ansi_type(), "CHARACTER VARYING");
+        assert_eq!(ColumnType::Integer.ansi_type(), "INT");
+        assert_eq!(ColumnType::Integer64.ansi_type(), "BIGINT");
+        assert_eq!(ColumnType::Boolean.ansi_type(), "BOOLEAN");
+        assert_eq!(ColumnType::Instant.ansi_type(), "TIMESTAMP WITH TIME ZONE");
+        assert_eq!(ColumnType::Base64Binary.ansi_type(), "BINARY");
+    }
+
+    #[test]
+    fn test_integer64_maps_to_bigint() {
+        assert_eq!(
+            ColumnType::from_fhir_type("integer64"),
+            ColumnType::Integer64
+        );
+        assert_eq!(ColumnType::from_fhir_type("integer"), ColumnType::Integer);
+        assert_eq!(ColumnType::from_ansi_type("BIGINT"), ColumnType::Integer64);
+        assert_eq!(ColumnType::from_ansi_type("INTEGER"), ColumnType::Integer);
     }
 
     #[test]

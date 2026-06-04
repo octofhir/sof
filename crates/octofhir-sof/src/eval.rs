@@ -958,8 +958,20 @@ fn column_type(col: &Column) -> ColumnType {
     if col.collection.unwrap_or(false) {
         return ColumnType::Json;
     }
+    // An `ansi/type` tag explicitly overrides the inferred column type.
+    if let Some(ansi) = ansi_type_tag(col) {
+        return ColumnType::from_ansi_type(ansi);
+    }
     col.col_type
         .as_deref()
         .map(ColumnType::from_fhir_type)
         .unwrap_or(ColumnType::String)
+}
+
+/// The value of a column's `ansi/type` tag, if present.
+pub(crate) fn ansi_type_tag(col: &Column) -> Option<&str> {
+    col.tag
+        .iter()
+        .find(|t| t.name == "ansi/type")
+        .and_then(|t| t.value.as_deref())
 }

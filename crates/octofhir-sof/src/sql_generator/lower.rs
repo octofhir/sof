@@ -219,11 +219,15 @@ impl Lower {
         let ast = parse_ast(&path).map_err(|e| Error::FhirPath(e.to_string()))?;
         let coll = self.coll(&ast, ctx)?;
         let collection = col.collection.unwrap_or(false);
-        let ty = col
-            .col_type
-            .as_deref()
-            .map(ColumnType::from_fhir_type)
-            .unwrap_or(ColumnType::String);
+        // An `ansi/type` tag explicitly overrides the inferred column type.
+        let ty = if let Some(ansi) = crate::eval::ansi_type_tag(col) {
+            ColumnType::from_ansi_type(ansi)
+        } else {
+            col.col_type
+                .as_deref()
+                .map(ColumnType::from_fhir_type)
+                .unwrap_or(ColumnType::String)
+        };
 
         let (expr, col_type) = if collection {
             (coll, ColumnType::Json)
@@ -242,7 +246,7 @@ impl Lower {
     /// "expected a single value" case for non-collection columns).
     fn scalar_col(&self, coll: &str, ty: ColumnType) -> String {
         let inner = match ty {
-            ColumnType::Integer => "(_e #>> '{}')::bigint",
+            ColumnType::Integer | ColumnType::Integer64 => "(_e #>> '{}')::bigint",
             ColumnType::Decimal => "(_e #>> '{}')::numeric",
             ColumnType::Boolean => "(_e #>> '{}')::boolean",
             ColumnType::Json => "_e",
