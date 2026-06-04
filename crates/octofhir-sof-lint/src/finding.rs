@@ -43,7 +43,10 @@ impl Finding {
             message: message.into(),
             severity,
             location: None,
-            help_url: Some(format!("https://octofhir.github.io/sof/rules/{code}")),
+            help_url: Some(format!(
+                "https://octofhir.github.io/sof/rules/{}",
+                code.to_lowercase()
+            )),
         }
     }
 

@@ -68,6 +68,20 @@ jobs:
         if: matrix.os == 'windows-latest'
         run: |
           Compress-Archive -Path target/${{ matrix.target }}/release/octofhir-sof.exe -DestinationPath octofhir-sof-${{ matrix.target }}.zip
+      # Emit a `<archive>.sha256` next to each archive so the installer can
+      # verify the download. The file holds the bare hash (awk '{print $1}' in
+      # install.sh reads the first field either way).
+      - name: Checksum (macOS)
+        if: matrix.os == 'macos-latest'
+        run: shasum -a 256 octofhir-sof-${{ matrix.target }}.tar.gz > octofhir-sof-${{ matrix.target }}.tar.gz.sha256
+      - name: Checksum (Linux)
+        if: startsWith(matrix.os, 'ubuntu')
+        run: sha256sum octofhir-sof-${{ matrix.target }}.tar.gz > octofhir-sof-${{ matrix.target }}.tar.gz.sha256
+      - name: Checksum (Windows)
+        if: matrix.os == 'windows-latest'
+        run: |
+          $h = (Get-FileHash -Algorithm SHA256 "octofhir-sof-${{ matrix.target }}.zip").Hash.ToLower()
+          "$h  octofhir-sof-${{ matrix.target }}.zip" | Out-File -Encoding ascii -NoNewline "octofhir-sof-${{ matrix.target }}.zip.sha256"
       - name: Upload to release
         uses: softprops/action-gh-release@v2
         with:
@@ -75,6 +89,8 @@ jobs:
           fail_on_unmatched_files: false
           files: |
             octofhir-sof-${{ matrix.target }}.tar.gz
+            octofhir-sof-${{ matrix.target }}.tar.gz.sha256
             octofhir-sof-${{ matrix.target }}.zip
+            octofhir-sof-${{ matrix.target }}.zip.sha256
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

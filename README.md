@@ -4,6 +4,8 @@ A Rust toolkit for [SQL on FHIR v2](https://build.fhir.org/ig/FHIR/sql-on-fhir-v
 parse `ViewDefinition` resources and turn FHIR data into flat tables — with no
 database required, or by generating PostgreSQL.
 
+**Documentation:** <https://octofhir.github.io/sof>
+
 - **Two interchangeable execution paths**, both passing the full official
   content-test suite (144/144):
   - a **database-free in-memory evaluator** over `serde_json`, and
@@ -17,6 +19,9 @@ database required, or by generating PostgreSQL.
 ## Install
 
 ```sh
+# Prebuilt binary (detects your platform, verifies SHA-256):
+curl -fsSL https://raw.githubusercontent.com/octofhir/sof/main/install.sh | sh
+
 # From crates.io:
 cargo install octofhir-sof-cli
 
