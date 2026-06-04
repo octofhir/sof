@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use octofhir_sof::output::get_writer;
-use octofhir_sof::{SqlGenerator, ViewDefinition, ViewRunner};
+use octofhir_sof::{SqlGenerator, ViewDefinition, ViewResult, ViewRunner};
 use octofhir_sof_lint::{FhirSchemaProvider, Severity, lint, validate_structure};
 use sqlx_postgres::PgPool;
 
@@ -30,20 +30,39 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Generate PostgreSQL from a ViewDefinition (offline, no database).
+    /// Generate PostgreSQL from a ViewDefinition (offline, no database). With
+    /// `--ddl`, emit a CREATE TABLE for the view's output columns instead.
     Generate {
         /// Path to the ViewDefinition JSON file.
         view: PathBuf,
+
+        /// Emit a CREATE TABLE statement for the output columns instead of the
+        /// SELECT query.
+        #[arg(long)]
+        ddl: bool,
+
+        /// DDL type dialect: ansi (spec default), postgres or duckdb. Only used
+        /// with `--ddl`.
+        #[arg(long, default_value = "ansi")]
+        dialect: String,
+
+        /// Table name for `--ddl` (defaults to the ViewDefinition name, or the
+        /// resource name suffixed with `_view`).
+        #[arg(long)]
+        table: Option<String>,
     },
 
     /// Execute a ViewDefinition and write the rows. Runs against FHIR files with
     /// `--input` (no database) or against PostgreSQL with `--db`.
     Run {
-        /// Path to the ViewDefinition JSON file.
+        /// Path to a ViewDefinition JSON file, or a directory of them. A
+        /// directory runs every view in one pass, writing one file per view
+        /// into the --out directory.
         view: PathBuf,
 
         /// FHIR resources to run against, with no database: an NDJSON file, a
-        /// Bundle, a JSON resource or array, or a directory of such files.
+        /// Bundle, a JSON resource or array, a directory of such files, or `-`
+        /// to read from stdin.
         #[arg(long, conflicts_with = "db")]
         input: Option<PathBuf>,
 
@@ -70,6 +89,10 @@ enum Command {
         /// Emit findings as machine-readable JSON instead of a report.
         #[arg(long)]
         json: bool,
+
+        /// Emit findings as SARIF 2.1.0 (for CI code scanning).
+        #[arg(long, conflicts_with = "json")]
+        sarif: bool,
     },
 
     /// Run a SQL-on-FHIR test-case file (the official content-test format:
@@ -99,6 +122,10 @@ enum Command {
         /// Emit findings as machine-readable JSON instead of a report.
         #[arg(long)]
         json: bool,
+
+        /// Emit findings as SARIF 2.1.0 (for CI code scanning).
+        #[arg(long, conflicts_with = "json")]
+        sarif: bool,
     },
 }
 
@@ -119,9 +146,94 @@ fn load_view(path: &PathBuf) -> Result<ViewDefinition> {
         .with_context(|| format!("parsing ViewDefinition {}", path.display()))
 }
 
+/// A resolved data source for `run`, shared across one or many views.
+enum Source {
+    Files(Vec<serde_json::Value>),
+    Db(PgPool),
+}
+
+/// Execute a single view against the resolved source.
+async fn run_view(source: &Source, view: &ViewDefinition) -> Result<ViewResult> {
+    match source {
+        Source::Files(resources) => {
+            octofhir_sof::execute(view, resources).context("executing view")
+        }
+        Source::Db(pool) => ViewRunner::new(pool.clone())
+            .run(view)
+            .await
+            .context("executing view"),
+    }
+}
+
+/// Load one or many ViewDefinitions. A directory yields every `*.json` view
+/// (sorted), keyed by view name (falling back to the file stem); a file yields
+/// a single entry. The key is used as the per-view output filename in multi mode.
+fn load_views(path: &PathBuf) -> Result<Vec<(String, ViewDefinition)>> {
+    if path.is_dir() {
+        let mut files: Vec<PathBuf> = fs::read_dir(path)
+            .with_context(|| format!("reading views directory {}", path.display()))?
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|x| x == "json"))
+            .collect();
+        files.sort();
+        if files.is_empty() {
+            anyhow::bail!("no ViewDefinition (*.json) files in {}", path.display());
+        }
+        let mut views = Vec::new();
+        for file in files {
+            let view = load_view(&file)?;
+            let stem = file
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "view".to_string());
+            let name = view.name.clone().filter(|n| !n.is_empty()).unwrap_or(stem);
+            views.push((name, view));
+        }
+        Ok(views)
+    } else {
+        let view = load_view(path)?;
+        let name = view
+            .name
+            .clone()
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(|| "view".to_string());
+        Ok(vec![(name, view)])
+    }
+}
+
+/// File extension for an output format (used for per-view filenames).
+fn output_extension(format: &str) -> &'static str {
+    match format.to_lowercase().as_str() {
+        "ndjson" => "ndjson",
+        "json" => "json",
+        "parquet" => "parquet",
+        _ => "csv",
+    }
+}
+
+/// The default DDL table name for a view: its `name`, else `<resource>_view`.
+fn default_table_name(view: &ViewDefinition) -> String {
+    view.name
+        .clone()
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| format!("{}_view", view.resource.to_lowercase()))
+}
+
 /// Load FHIR resources from a file or a directory of files. Supports NDJSON
 /// (`.ndjson`), single resources, resource arrays, and Bundles.
 fn load_resources(path: &PathBuf) -> Result<Vec<serde_json::Value>> {
+    // `-` reads FHIR resources from stdin (NDJSON or a single JSON value).
+    if path.as_os_str() == "-" {
+        let mut text = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut text)
+            .context("reading FHIR resources from stdin")?;
+        let mut resources = Vec::new();
+        parse_resource_text(&text, &mut resources).context("parsing stdin")?;
+        if resources.is_empty() {
+            anyhow::bail!("no FHIR resources found on stdin");
+        }
+        return Ok(resources);
+    }
     let mut resources = Vec::new();
     if path.is_dir() {
         let mut entries: Vec<PathBuf> = fs::read_dir(path)
@@ -156,6 +268,69 @@ fn load_file(path: &PathBuf, out: &mut Vec<serde_json::Value>) -> Result<()> {
     } else {
         let value: serde_json::Value =
             serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+        push_resource(value, out);
+    }
+    Ok(())
+}
+
+/// Stream NDJSON input through a compiled view, writing NDJSON rows as they are
+/// produced. Reads one line at a time and never holds the whole input or output
+/// in memory. Returns the number of rows written.
+fn stream_ndjson(view: &ViewDefinition, input: &PathBuf, sink: &mut dyn Write) -> Result<usize> {
+    use std::io::BufRead;
+
+    let compiled = octofhir_sof::CompiledView::compile(view).context("compiling view")?;
+    let reader: Box<dyn BufRead> = if input.as_os_str() == "-" {
+        Box::new(io::BufReader::new(io::stdin()))
+    } else {
+        Box::new(io::BufReader::new(
+            fs::File::open(input).with_context(|| format!("opening {}", input.display()))?,
+        ))
+    };
+
+    let names: Vec<String> = compiled.columns().iter().map(|c| c.name.clone()).collect();
+    let mut total = 0;
+    for (i, line) in reader.lines().enumerate() {
+        let line = line.with_context(|| format!("reading line {}", i + 1))?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let value: serde_json::Value =
+            serde_json::from_str(&line).with_context(|| format!("parsing line {}", i + 1))?;
+        // Expand a Bundle/array line into its resources.
+        let mut resources = Vec::new();
+        push_resource(value, &mut resources);
+        for resource in &resources {
+            for row in compiled.execute_resource(resource)? {
+                let obj: serde_json::Map<String, serde_json::Value> = names
+                    .iter()
+                    .cloned()
+                    .zip(row)
+                    .filter(|(_, v)| !v.is_null())
+                    .collect();
+                writeln!(sink, "{}", serde_json::Value::Object(obj))
+                    .context("writing NDJSON row")?;
+                total += 1;
+            }
+        }
+    }
+    Ok(total)
+}
+
+/// Parse resource text of unknown shape: a single JSON value (object, array or
+/// Bundle) if it parses whole, otherwise NDJSON (one JSON value per line). Used
+/// for stdin, where there is no filename extension to disambiguate.
+fn parse_resource_text(text: &str, out: &mut Vec<serde_json::Value>) -> Result<()> {
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(text) {
+        push_resource(value, out);
+        return Ok(());
+    }
+    for (i, line) in text.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let value: serde_json::Value =
+            serde_json::from_str(line).with_context(|| format!("parsing line {}", i + 1))?;
         push_resource(value, out);
     }
     Ok(())
@@ -295,20 +470,52 @@ fn canonical_json(v: &serde_json::Value) -> String {
 }
 
 /// Print findings (JSON or rustc-style) and report whether any are errors.
+/// Output format for validate/lint findings.
+#[derive(Clone, Copy, PartialEq)]
+enum ReportFormat {
+    Human,
+    Json,
+    Sarif,
+}
+
+impl ReportFormat {
+    fn from_flags(json: bool, sarif: bool) -> Self {
+        if sarif {
+            Self::Sarif
+        } else if json {
+            Self::Json
+        } else {
+            Self::Human
+        }
+    }
+}
+
+/// Report findings in the chosen format. Returns true if any finding is an
+/// error (so the caller can set a non-zero exit code). For machine formats
+/// (JSON/SARIF) an empty finding list still emits a valid empty report.
 fn report_findings(
     origin: &str,
     source: &str,
     findings: &[octofhir_sof_lint::Finding],
-    json: bool,
+    fmt: ReportFormat,
     color: bool,
+    ok_msg: &str,
 ) -> bool {
-    if json {
-        println!("{}", diagnostic::render_findings_json(findings));
-    } else {
-        print!(
-            "{}",
-            diagnostic::render_findings(origin, source, findings, color)
-        );
+    match fmt {
+        ReportFormat::Json => println!("{}", diagnostic::render_findings_json(findings)),
+        ReportFormat::Sarif => {
+            println!("{}", diagnostic::render_findings_sarif(origin, findings))
+        }
+        ReportFormat::Human => {
+            if findings.is_empty() {
+                println!("{}", diagnostic::ok(ok_msg, color));
+            } else {
+                print!(
+                    "{}",
+                    diagnostic::render_findings(origin, source, findings, color)
+                );
+            }
+        }
     }
     findings.iter().any(|f| f.severity == Severity::Error)
 }
@@ -325,12 +532,27 @@ async fn main() {
 
 async fn run(cli: Cli, color: bool) -> Result<()> {
     match cli.command {
-        Command::Generate { view } => {
+        Command::Generate {
+            view,
+            ddl,
+            dialect,
+            table,
+        } => {
             let view = load_view(&view)?;
             let generated = SqlGenerator::new()
                 .generate(&view)
                 .context("generating SQL")?;
-            println!("{}", generated.sql);
+            if ddl {
+                let dialect: octofhir_sof::Dialect =
+                    dialect.parse().map_err(|e: String| anyhow::anyhow!(e))?;
+                let table = table.unwrap_or_else(|| default_table_name(&view));
+                print!(
+                    "{}",
+                    octofhir_sof::create_table(&table, &generated.columns, dialect)
+                );
+            } else {
+                println!("{}", generated.sql);
+            }
         }
         Command::Run {
             view,
@@ -339,48 +561,89 @@ async fn run(cli: Cli, color: bool) -> Result<()> {
             output,
             out,
         } => {
-            let view = load_view(&view)?;
-            let result = match (input, db) {
-                (Some(path), _) => {
-                    let resources = load_resources(&path)?;
-                    octofhir_sof::execute(&view, &resources).context("executing view")?
-                }
-                (None, Some(db)) => {
-                    let pool = PgPool::connect(&db)
+            // A directory of ViewDefinitions runs every view in one pass, writing
+            // one output file per view into the --out directory.
+            let multi = view.is_dir();
+
+            // Fast path: a single view, NDJSON input (file or stdin) and NDJSON
+            // output stream resource-by-resource in bounded memory.
+            let ndjson_in = input.as_ref().is_some_and(|p| {
+                p.as_os_str() == "-" || p.extension().is_some_and(|x| x == "ndjson")
+            });
+            if !multi && output.eq_ignore_ascii_case("ndjson") && ndjson_in {
+                let view = load_view(&view)?;
+                let path = input.expect("checked above");
+                let mut sink: Box<dyn Write> = match &out {
+                    Some(path) => Box::new(
+                        fs::File::create(path)
+                            .with_context(|| format!("creating {}", path.display()))?,
+                    ),
+                    None => Box::new(io::stdout().lock()),
+                };
+                let n = stream_ndjson(&view, &path, &mut sink)?;
+                sink.flush().ok();
+                eprintln!("{n} rows");
+                return Ok(());
+            }
+
+            let views = load_views(&view)?;
+
+            // Acquire the data source once, shared across all views.
+            let source = match (input, db) {
+                (Some(path), _) => Source::Files(load_resources(&path)?),
+                (None, Some(db)) => Source::Db(
+                    PgPool::connect(&db)
                         .await
-                        .with_context(|| format!("connecting to {db}"))?;
-                    ViewRunner::new(pool)
-                        .run(&view)
-                        .await
-                        .context("executing view")?
-                }
+                        .with_context(|| format!("connecting to {db}"))?,
+                ),
                 (None, None) => {
-                    anyhow::bail!("provide --input <file|dir> to run on files, or --db <url>")
+                    anyhow::bail!("provide --input <file|dir|-> to run on files, or --db <url>")
                 }
             };
 
             let writer = get_writer(&output).context("selecting output format")?;
-            let mut sink: Box<dyn Write> = match out {
-                Some(path) => Box::new(
-                    fs::File::create(&path)
-                        .with_context(|| format!("creating {}", path.display()))?,
-                ),
-                None => Box::new(io::stdout().lock()),
-            };
-            writer.write(&result, &mut sink).context("writing output")?;
-            sink.flush().ok();
+
+            if multi {
+                let out_dir =
+                    out.context("--out <dir> is required when running a directory of views")?;
+                fs::create_dir_all(&out_dir)
+                    .with_context(|| format!("creating output directory {}", out_dir.display()))?;
+                let ext = output_extension(&output);
+                for (name, view) in &views {
+                    let result = run_view(&source, view).await?;
+                    let path = out_dir.join(format!("{name}.{ext}"));
+                    let mut sink: Box<dyn Write> = Box::new(
+                        fs::File::create(&path)
+                            .with_context(|| format!("creating {}", path.display()))?,
+                    );
+                    writer
+                        .write(&result, &mut sink)
+                        .with_context(|| format!("writing {}", path.display()))?;
+                    sink.flush().ok();
+                    eprintln!("{} -> {}", name, path.display());
+                }
+            } else {
+                let (_, view) = &views[0];
+                let result = run_view(&source, view).await?;
+                let mut sink: Box<dyn Write> = match out {
+                    Some(path) => Box::new(
+                        fs::File::create(&path)
+                            .with_context(|| format!("creating {}", path.display()))?,
+                    ),
+                    None => Box::new(io::stdout().lock()),
+                };
+                writer.write(&result, &mut sink).context("writing output")?;
+                sink.flush().ok();
+            }
         }
-        Command::Validate { view, json } => {
+        Command::Validate { view, json, sarif } => {
             let origin = view.display().to_string();
             let (source, view) = read_view(&view)?;
             let findings = validate_structure(&view);
-            if findings.is_empty() && !json {
-                println!("{}", diagnostic::ok("valid", color));
-            } else {
-                let has_error = report_findings(&origin, &source, &findings, json, color);
-                if has_error {
-                    std::process::exit(1);
-                }
+            let fmt = ReportFormat::from_flags(json, sarif);
+            let has_error = report_findings(&origin, &source, &findings, fmt, color, "valid");
+            if has_error {
+                std::process::exit(1);
             }
         }
         Command::Test { manifest } => {
@@ -420,6 +683,7 @@ async fn run(cli: Cli, color: bool) -> Result<()> {
             package,
             version,
             json,
+            sarif,
         } => {
             let origin = view.display().to_string();
             let (source, view) = read_view(&view)?;
@@ -434,13 +698,10 @@ async fn run(cli: Cli, color: bool) -> Result<()> {
             }
 
             let findings = lint(&view, &provider);
-            if findings.is_empty() && !json {
-                println!("{}", diagnostic::ok("no findings", color));
-            } else {
-                let has_error = report_findings(&origin, &source, &findings, json, color);
-                if has_error {
-                    std::process::exit(1);
-                }
+            let fmt = ReportFormat::from_flags(json, sarif);
+            let has_error = report_findings(&origin, &source, &findings, fmt, color, "no findings");
+            if has_error {
+                std::process::exit(1);
             }
         }
     }

@@ -30,81 +30,122 @@ use crate::{Error, Result};
 /// column shape is inconsistent (duplicate names, mismatched `unionAll`
 /// branches), or a non-collection column yields more than one value.
 pub fn execute(view: &ViewDefinition, resources: &[Value]) -> Result<ViewResult> {
-    if view.resource.trim().is_empty() {
-        return Err(Error::InvalidViewDefinition(
-            "ViewDefinition is missing the required `resource`".to_string(),
-        ));
-    }
-    let constants = build_constants(view)?;
-    let ev = Evaluator {
-        resource_type: view.resource.clone(),
-        constants,
-    };
-
-    let shape = ev.shape(&view.select)?;
-    if shape.is_empty() {
-        return Err(Error::InvalidViewDefinition(
-            "ViewDefinition produces no columns".to_string(),
-        ));
-    }
-    let mut seen = std::collections::HashSet::new();
-    for (name, _) in &shape {
-        if !seen.insert(name.clone()) {
-            return Err(Error::InvalidViewDefinition(format!(
-                "column `{name}` is defined more than once"
-            )));
-        }
-    }
-
-    let where_asts = view
-        .where_
-        .iter()
-        .map(|w| ev.parse(&w.path))
-        .collect::<Result<Vec<_>>>()?;
-
-    let mut rows: Vec<Map<String, Value>> = Vec::new();
+    let compiled = CompiledView::compile(view)?;
+    let mut data: Vec<Vec<Value>> = Vec::new();
     for resource in resources {
-        if resource.get("resourceType").and_then(Value::as_str) != Some(ev.resource_type.as_str()) {
-            continue;
-        }
-        let mut keep = true;
-        for ast in &where_asts {
-            if !ev.eval_where(ast, resource)? {
-                keep = false;
-                break;
-            }
-        }
-        if !keep {
-            continue;
-        }
-
-        let mut combos = vec![Map::new()];
-        for select in &view.select {
-            let srows = ev.eval_select(select, resource, 0)?;
-            combos = cartesian(&combos, &srows);
-        }
-        rows.extend(combos);
+        data.extend(compiled.execute_resource(resource)?);
     }
-
-    let columns: Vec<ColumnInfo> = shape
-        .iter()
-        .map(|(name, ty)| ColumnInfo::new(name.clone(), *ty))
-        .collect();
-    let data: Vec<Vec<Value>> = rows
-        .iter()
-        .map(|row| {
-            shape
-                .iter()
-                .map(|(name, _)| row.get(name).cloned().unwrap_or(Value::Null))
-                .collect()
-        })
-        .collect();
     let row_count = data.len();
     Ok(ViewResult {
-        columns,
+        columns: compiled.columns().to_vec(),
         data,
         row_count,
     })
+}
+
+/// A ViewDefinition compiled once for repeated, resource-at-a-time execution.
+///
+/// Validates the view (columns, name collisions, constants) up front, then lets
+/// callers stream resources through [`CompiledView::execute_resource`] without
+/// holding the whole dataset in memory.
+pub struct CompiledView {
+    ev: Evaluator,
+    selects: Vec<SelectColumn>,
+    where_asts: Vec<ExpressionNode>,
+    shape: Vec<(String, ColumnType)>,
+    columns: Vec<ColumnInfo>,
+}
+
+impl CompiledView {
+    /// Compile and validate a ViewDefinition.
+    pub fn compile(view: &ViewDefinition) -> Result<Self> {
+        if view.resource.trim().is_empty() {
+            return Err(Error::InvalidViewDefinition(
+                "ViewDefinition is missing the required `resource`".to_string(),
+            ));
+        }
+        let constants = build_constants(view)?;
+        let ev = Evaluator {
+            resource_type: view.resource.clone(),
+            constants,
+        };
+
+        let shape = ev.shape(&view.select)?;
+        if shape.is_empty() {
+            return Err(Error::InvalidViewDefinition(
+                "ViewDefinition produces no columns".to_string(),
+            ));
+        }
+        let mut seen = std::collections::HashSet::new();
+        for (name, _) in &shape {
+            if !seen.insert(name.clone()) {
+                return Err(Error::InvalidViewDefinition(format!(
+                    "column `{name}` is defined more than once"
+                )));
+            }
+        }
+
+        let where_asts = view
+            .where_
+            .iter()
+            .map(|w| ev.parse(&w.path))
+            .collect::<Result<Vec<_>>>()?;
+
+        let columns = shape
+            .iter()
+            .map(|(name, ty)| ColumnInfo::new(name.clone(), *ty))
+            .collect();
+
+        Ok(Self {
+            ev,
+            selects: view.select.clone(),
+            where_asts,
+            shape,
+            columns,
+        })
+    }
+
+    /// The output columns, in order.
+    pub fn columns(&self) -> &[ColumnInfo] {
+        &self.columns
+    }
+
+    /// The FHIR resource type this view selects from.
+    pub fn resource_type(&self) -> &str {
+        &self.ev.resource_type
+    }
+
+    /// Evaluate the view against a single resource, returning its rows (column
+    /// values in column order). Resources of a different type, or filtered out
+    /// by `where`, yield no rows.
+    pub fn execute_resource(&self, resource: &Value) -> Result<Vec<Vec<Value>>> {
+        if resource.get("resourceType").and_then(Value::as_str)
+            != Some(self.ev.resource_type.as_str())
+        {
+            return Ok(Vec::new());
+        }
+        for ast in &self.where_asts {
+            if !self.ev.eval_where(ast, resource)? {
+                return Ok(Vec::new());
+            }
+        }
+
+        let mut combos = vec![Map::new()];
+        for select in &self.selects {
+            let srows = self.ev.eval_select(select, resource, 0)?;
+            combos = cartesian(&combos, &srows);
+        }
+
+        Ok(combos
+            .iter()
+            .map(|row| {
+                self.shape
+                    .iter()
+                    .map(|(name, _)| row.get(name).cloned().unwrap_or(Value::Null))
+                    .collect()
+            })
+            .collect())
+    }
 }
 
 /// The cartesian product of two row sets, merging each pair of maps.
@@ -184,6 +225,24 @@ impl Evaluator {
         let for_each = select.for_each.as_deref();
         let for_each_or_null = select.for_each_or_null.as_deref();
 
+        // `repeat` recursively traverses the focus, collecting every node reached
+        // by transitively re-applying the repeat path(s) (preorder, the focus
+        // node itself excluded). %rowIndex tracks position in the flattened list.
+        if !select.repeat.is_empty() {
+            let asts = select
+                .repeat
+                .iter()
+                .map(|p| self.parse(p))
+                .collect::<Result<Vec<_>>>()?;
+            let mut foci = Vec::new();
+            self.repeat_collect(&asts, ctx, &mut foci)?;
+            let mut rows = Vec::new();
+            for (idx, focus) in foci.iter().enumerate() {
+                rows.extend(self.eval_level(select, focus, idx as i64)?);
+            }
+            return Ok(rows);
+        }
+
         if let Some(path) = for_each.or(for_each_or_null) {
             let ast = self.parse(path)?;
             let elements = self.eval_coll(&ast, ctx, rid)?;
@@ -235,13 +294,49 @@ impl Evaluator {
         Ok(combos)
     }
 
-    /// An all-null row for an empty `forEachOrNull`, honouring `%rowIndex` → 0.
+    /// Preorder transitive closure of the `repeat` path(s): apply every path to
+    /// `node`, push each result, then recurse into it. The starting node itself
+    /// is not emitted.
+    fn repeat_collect(
+        &self,
+        paths: &[ExpressionNode],
+        node: &Value,
+        out: &mut Vec<Value>,
+    ) -> Result<()> {
+        for ast in paths {
+            for child in self.eval_coll(ast, node, 0)? {
+                out.push(child.clone());
+                self.repeat_collect(paths, &child, out)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// An all-null row for an empty `forEachOrNull`. Per spec, columns whose path
+    /// is `%rowIndex` are bound to 0 rather than null.
     fn null_row(&self, select: &SelectColumn) -> Map<String, Value> {
         let mut row = Map::new();
-        for (name, _) in self.shape_of(select).unwrap_or_default() {
-            row.insert(name, Value::Null);
-        }
+        self.null_fill(select, &mut row);
         row
+    }
+
+    fn null_fill(&self, select: &SelectColumn, row: &mut Map<String, Value>) {
+        if let Some(columns) = &select.column {
+            for col in columns {
+                let v = if col.path.trim() == "%rowIndex" {
+                    Value::Number(0.into())
+                } else {
+                    Value::Null
+                };
+                row.insert(col.name.clone(), v);
+            }
+        }
+        for nested in &select.select {
+            self.null_fill(nested, row);
+        }
+        if let Some(first) = select.union_all.as_ref().and_then(|b| b.first()) {
+            self.null_fill(first, row);
+        }
     }
 
     fn column_value(&self, col: &Column, ctx: &Value, rid: i64) -> Result<Value> {
@@ -387,6 +482,11 @@ impl Evaluator {
             "empty" => Ok(vec![Value::Bool(coll.is_empty())]),
             "count" => Ok(vec![Value::Number((coll.len() as i64).into())]),
             "join" => {
+                // join() over an empty collection yields the empty collection
+                // (i.e. null), not an empty string. (FHIR/sql-on-fhir.js fn_join)
+                if coll.is_empty() {
+                    return Ok(vec![]);
+                }
                 let sep = match args.first() {
                     Some(a) => self.string_arg(a)?,
                     None => String::new(),
@@ -899,8 +999,20 @@ fn column_type(col: &Column) -> ColumnType {
     if col.collection.unwrap_or(false) {
         return ColumnType::Json;
     }
+    // An `ansi/type` tag explicitly overrides the inferred column type.
+    if let Some(ansi) = ansi_type_tag(col) {
+        return ColumnType::from_ansi_type(ansi);
+    }
     col.col_type
         .as_deref()
         .map(ColumnType::from_fhir_type)
         .unwrap_or(ColumnType::String)
+}
+
+/// The value of a column's `ansi/type` tag, if present.
+pub(crate) fn ansi_type_tag(col: &Column) -> Option<&str> {
+    col.tag
+        .iter()
+        .find(|t| t.name == "ansi/type")
+        .and_then(|t| t.value.as_deref())
 }

@@ -25,11 +25,11 @@ clap = { version = "4", features = ["derive", "env"] }
 anyhow = "1.0"
 annotate-snippets = "0.11"
 
-# Lint engine (local path deps until all banshee crates publish)
-banshee_hir = { path = "../mold/crates/banshee_hir" }
-banshee_parser = { path = "../mold/crates/banshee_parser" }
-banshee_syntax = { path = "../mold/crates/banshee_syntax" }
-banshee_format = { path = "../mold/crates/banshee_format" }
+# Lint engine (banshee, published on crates.io)
+banshee_hir = "0.1.0"
+banshee_parser = "0.1.0"
+banshee_syntax = "0.1.0"
+banshee_format = "0.1.0"
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }

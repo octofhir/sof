@@ -43,6 +43,20 @@ install:
 conformance:
     cargo test -p octofhir-sof --test conformance_memory -- --nocapture
 
+# Refresh the vendored official content tests from upstream (FHIR/sql-on-fhir.js).
+update-spec-tests:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    tmp="$(mktemp -d)"
+    git clone --depth 1 https://github.com/FHIR/sql-on-fhir.js.git "$tmp" >/dev/null 2>&1
+    sha="$(git -C "$tmp" rev-parse HEAD)"
+    dest="crates/octofhir-sof/tests/spec"
+    cp "$tmp"/tests/*.json "$dest"/
+    cp "$tmp"/tests.schema.json "$dest"/
+    sed -i.bak -E "s/^Commit: .*/Commit: $sha/" "$dest/SOURCE.md" && rm -f "$dest/SOURCE.md.bak"
+    rm -rf "$tmp"
+    echo "Updated vendored spec tests to $sha"
+
 # Run the official content tests against PostgreSQL (set SOF_CONFORMANCE_DB).
 conformance-pg db="postgres://postgres:postgres@localhost:55433/conformance":
     SOF_CONFORMANCE_DB="{{db}}" cargo test -p octofhir-sof --test conformance -- --nocapture

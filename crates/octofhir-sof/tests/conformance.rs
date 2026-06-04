@@ -62,7 +62,10 @@ async fn sql_on_fhir_conformance() {
         .unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display()))
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| p.extension().is_some_and(|x| x == "json"))
-        .filter(|p| p.file_name().is_some_and(|n| n != "manifest.json"))
+        .filter(|p| {
+            p.file_name()
+                .is_some_and(|n| n != "manifest.json" && n != "tests.schema.json")
+        })
         .collect();
     files.sort();
 
@@ -81,13 +84,20 @@ async fn sql_on_fhir_conformance() {
 
     report(&outcomes);
 
-    // The harness records a baseline; it does not gate the build while the
-    // generator is being brought up to spec. Failure detail is in the report.
+    // The PostgreSQL generator passes the full vendored suite; gate on it when a
+    // database is available (the suite is skipped entirely without one).
+    let failed = outcomes.iter().filter(|o| !o.passed).count();
+    assert_eq!(failed, 0, "{failed} PostgreSQL conformance cases failed");
 }
 
 fn test_cases_dir() -> PathBuf {
     if let Ok(d) = std::env::var("SOF_TEST_CASES_DIR") {
         return PathBuf::from(d);
+    }
+    // Prefer the vendored official reference suite (see tests/spec/SOURCE.md).
+    let vendored = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/spec");
+    if vendored.is_dir() {
+        return vendored;
     }
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../../fhir-test-cases/sql-on-fhir")

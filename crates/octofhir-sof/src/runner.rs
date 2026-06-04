@@ -91,7 +91,7 @@ fn extract_row_values(row: &PgRow, columns: &[GeneratedColumn]) -> Vec<Value> {
 /// Extract a single column value from a row.
 fn extract_column_value(row: &PgRow, index: usize, col_type: &ColumnType) -> Value {
     match col_type {
-        ColumnType::Integer => row
+        ColumnType::Integer | ColumnType::Integer64 => row
             .try_get::<Option<i64>, _>(index)
             .ok()
             .flatten()
