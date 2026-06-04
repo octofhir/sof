@@ -1,217 +1,23 @@
-//! SQL generation from ViewDefinitions.
-//!
-//! Converts a [`ViewDefinition`] into a PostgreSQL query over FHIR resources
-//! stored as JSONB. FHIRPath selectors, `where` filters and `constant`
-//! references are parsed with the real `octofhir-fhirpath` parser and the AST is
-//! lowered to SQL with a collection-aware model: every FHIRPath sub-expression
-//! evaluates to a JSONB *array* (a FHIRPath collection), so a singleton and a
-//! one-element collection behave identically and array navigation flattens the
-//! way the spec requires.
+//! The AST→SQL lowering engine: turns a parsed FHIRPath expression into a
+//! JSONB-collection SQL expression, and builds the per-level row plans.
 
 use std::cell::Cell;
 use std::collections::HashMap;
 
 use octofhir_fhirpath::{BinaryOperator, ExpressionNode, LiteralValue, UnaryOperator, parse_ast};
-use serde_json::Value;
 
 use crate::Error;
 use crate::column::ColumnType;
-use crate::view_definition::{Column, Constant, SelectColumn, ViewDefinition};
+use crate::view_definition::{Column, SelectColumn};
 
-/// Generates SQL queries from ViewDefinitions.
-pub struct SqlGenerator {
-    /// Alias used for the base table (e.g. `base` in `FROM patient base`).
-    table_pattern: String,
-    /// Optional row-status predicate template; `{base}` is replaced with the
-    /// base alias. `None` disables row filtering entirely.
-    row_filter: Option<String>,
-}
-
-impl Default for SqlGenerator {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl SqlGenerator {
-    /// Create a new SQL generator with default settings.
-    pub fn new() -> Self {
-        Self {
-            table_pattern: "base".to_string(),
-            row_filter: Some("{base}.status <> 'deleted'".to_string()),
-        }
-    }
-
-    /// Create a new SQL generator with a custom base-table alias.
-    pub fn with_table_pattern(table_pattern: impl Into<String>) -> Self {
-        Self {
-            table_pattern: table_pattern.into(),
-            ..Self::new()
-        }
-    }
-
-    /// Set the row-status predicate. `{base}` is replaced with the base alias.
-    /// Pass `None` to emit no row filter (useful for plain tables that have no
-    /// `status` column).
-    pub fn with_row_filter(mut self, filter: Option<String>) -> Self {
-        self.row_filter = filter;
-        self
-    }
-
-    /// Generate SQL from a ViewDefinition.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if a FHIRPath selector cannot be parsed or lowered, if a
-    /// referenced constant is undefined, or if the view's column shape is
-    /// inconsistent across `unionAll` branches.
-    pub fn generate(&self, view: &ViewDefinition) -> Result<GeneratedSql, Error> {
-        if view.resource.trim().is_empty() {
-            return Err(Error::InvalidViewDefinition(
-                "ViewDefinition is missing the required `resource`".to_string(),
-            ));
-        }
-
-        let constants = build_constants(view)?;
-        let lower = Lower {
-            resource_type: view.resource.clone(),
-            constants,
-            seq: Cell::new(0),
-            row_idx: std::cell::RefCell::new("0".to_string()),
-        };
-
-        let table = view.resource.to_lowercase();
-        let ctx0 = format!("{}.resource", self.table_pattern);
-
-        // Top-level selects cross-join, exactly like nested selects.
-        let mut plans = vec![Plan::empty()];
-        for select in &view.select {
-            let mut next = Vec::new();
-            for p in &plans {
-                for child in lower.build_select(select, &p.joins, &ctx0)? {
-                    next.push(p.cross(&child));
-                }
-            }
-            plans = next;
-        }
-
-        if plans.is_empty() || plans.iter().all(|p| p.columns.is_empty()) {
-            return Err(Error::InvalidViewDefinition(
-                "ViewDefinition produces no columns".to_string(),
-            ));
-        }
-
-        // Every UNION ALL branch must expose the same ordered column shape.
-        let shape: Vec<&str> = plans[0].columns.iter().map(|c| c.name.as_str()).collect();
-        for p in &plans[1..] {
-            let other: Vec<&str> = p.columns.iter().map(|c| c.name.as_str()).collect();
-            if other != shape {
-                return Err(Error::InvalidViewDefinition(
-                    "unionAll branches have mismatched column shape".to_string(),
-                ));
-            }
-        }
-
-        // Lower top-level `where` filters to booleans over the base resource.
-        let mut where_sql = Vec::new();
-        for clause in &view.where_ {
-            let path = lower.substitute(&clause.path)?;
-            let ast = parse_ast(&path).map_err(|e| Error::FhirPath(e.to_string()))?;
-            where_sql.push(lower.bool(&ast, &ctx0)?);
-        }
-
-        let select_sqls: Vec<String> = plans
-            .iter()
-            .map(|p| self.render_plan(&table, p, &where_sql))
-            .collect();
-        let sql = select_sqls.join(" UNION ALL ");
-
-        let columns = plans[0]
-            .columns
-            .iter()
-            .map(|c| GeneratedColumn {
-                name: c.name.clone(),
-                expression: c.expr.clone(),
-                alias: c.name.clone(),
-                col_type: c.col_type,
-            })
-            .collect();
-
-        Ok(GeneratedSql {
-            sql,
-            columns,
-            ctes: Vec::new(),
-        })
-    }
-
-    fn render_plan(&self, table: &str, plan: &Plan, where_sql: &[String]) -> String {
-        let cols: Vec<String> = plan
-            .columns
-            .iter()
-            .map(|c| format!("{} AS \"{}\"", c.expr, c.name.replace('"', "\"\"")))
-            .collect();
-        let mut sql = format!(
-            "SELECT {} FROM {} {}",
-            cols.join(", "),
-            table,
-            self.table_pattern
-        );
-        for j in &plan.joins {
-            sql.push(' ');
-            sql.push_str(j);
-        }
-        let mut conds = Vec::new();
-        if let Some(f) = &self.row_filter {
-            conds.push(f.replace("{base}", &self.table_pattern));
-        }
-        for w in where_sql {
-            conds.push(format!("({w})"));
-        }
-        if !conds.is_empty() {
-            sql.push_str(" WHERE ");
-            sql.push_str(&conds.join(" AND "));
-        }
-        sql
-    }
-}
-
-/// A column produced by a plan, with the SQL expression that yields it.
-#[derive(Debug, Clone)]
-struct PlanColumn {
-    name: String,
-    expr: String,
-    col_type: ColumnType,
-}
-
-/// One UNION ALL branch: a chain of lateral joins plus its output columns.
-#[derive(Debug, Clone)]
-struct Plan {
-    joins: Vec<String>,
-    columns: Vec<PlanColumn>,
-}
-
-impl Plan {
-    fn empty() -> Self {
-        Self {
-            joins: Vec::new(),
-            columns: Vec::new(),
-        }
-    }
-
-    /// Cross join two plans: the child's joins already include this plan's joins
-    /// as a prefix, so its join list wins; columns concatenate.
-    fn cross(&self, child: &Plan) -> Plan {
-        let mut columns = self.columns.clone();
-        columns.extend(child.columns.iter().cloned());
-        Plan {
-            joins: child.joins.clone(),
-            columns,
-        }
-    }
-}
+use super::boundary::{
+    BoundaryType, boundary_hint, capitalize_first, date_bound, datetime_bound, time_bound,
+};
+use super::constants::substitute_constants;
+use super::{Plan, PlanColumn};
 
 /// The AST→SQL lowering context for a single `generate` call.
-struct Lower {
+pub(super) struct Lower {
     resource_type: String,
     /// Constant name → FHIRPath literal text, pre-rendered for substitution.
     constants: HashMap<String, String>,
@@ -223,6 +29,15 @@ struct Lower {
 }
 
 impl Lower {
+    pub(super) fn new(resource_type: String, constants: HashMap<String, String>) -> Self {
+        Self {
+            resource_type,
+            constants,
+            seq: Cell::new(0),
+            row_idx: std::cell::RefCell::new("0".to_string()),
+        }
+    }
+
     fn fresh(&self) -> usize {
         let v = self.seq.get();
         self.seq.set(v + 1);
@@ -231,7 +46,7 @@ impl Lower {
 
     /// Build the UNION ALL branches for a select node, given the join prefix and
     /// the current focus item (`ctx`, a JSONB scalar SQL expression).
-    fn build_select(
+    pub(super) fn build_select(
         &self,
         select: &SelectColumn,
         prefix: &[String],
@@ -681,7 +496,7 @@ impl Lower {
 
     // --- Boolean lowering for `where` filters and comparisons. ---
 
-    fn bool(&self, node: &ExpressionNode, item: &str) -> Result<String, Error> {
+    pub(super) fn bool(&self, node: &ExpressionNode, item: &str) -> Result<String, Error> {
         match node {
             ExpressionNode::Parenthesized(e) => self.bool(e, item),
             ExpressionNode::UnaryOperation(u) if matches!(u.operator, UnaryOperator::Not) => {
@@ -892,287 +707,7 @@ impl Lower {
 
     /// Replace `%name` constant references with their FHIRPath literal text.
     /// Errors on a reference to an undefined constant.
-    fn substitute(&self, path: &str) -> Result<String, Error> {
+    pub(super) fn substitute(&self, path: &str) -> Result<String, Error> {
         substitute_constants(path, &self.constants)
-    }
-}
-
-/// Replace `%name` constant references with their FHIRPath literal text.
-/// `%rowIndex` is preserved for the evaluator to resolve. Errors on a reference
-/// to an undefined constant.
-pub(crate) fn substitute_constants(
-    path: &str,
-    constants: &HashMap<String, String>,
-) -> Result<String, Error> {
-    let mut out = String::with_capacity(path.len());
-    let mut chars = path.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c != '%' {
-            out.push(c);
-            continue;
-        }
-        let mut name = String::new();
-        while let Some(&nc) = chars.peek() {
-            if nc.is_ascii_alphanumeric() || nc == '_' {
-                name.push(nc);
-                chars.next();
-            } else {
-                break;
-            }
-        }
-        if name.is_empty() {
-            out.push('%');
-            continue;
-        }
-        if name == "rowIndex" {
-            out.push('%');
-            out.push_str(&name);
-            continue;
-        }
-        match constants.get(&name) {
-            Some(lit) => out.push_str(lit),
-            None => {
-                return Err(Error::InvalidViewDefinition(format!(
-                    "undefined constant %{name}"
-                )));
-            }
-        }
-    }
-    Ok(out)
-}
-
-/// Render each constant as a FHIRPath literal for substitution into selectors.
-pub(crate) fn build_constants(view: &ViewDefinition) -> Result<HashMap<String, String>, Error> {
-    let mut map = HashMap::new();
-    for c in &view.constant {
-        map.insert(c.name.clone(), constant_literal(c)?);
-    }
-    Ok(map)
-}
-
-fn constant_literal(c: &Constant) -> Result<String, Error> {
-    if let Some(s) = &c.value_string {
-        return Ok(fhirpath_string(s));
-    }
-    if let Some(i) = c.value_integer {
-        return Ok(i.to_string());
-    }
-    if let Some(b) = c.value_boolean {
-        return Ok(b.to_string());
-    }
-    if let Some(d) = c.value_decimal {
-        return Ok(d.to_string());
-    }
-    // Polymorphic value[x] captured via flatten.
-    for (k, v) in &c.values {
-        if !k.starts_with("value") {
-            continue;
-        }
-        return match v {
-            Value::String(s) => Ok(fhirpath_string(s)),
-            Value::Bool(b) => Ok(b.to_string()),
-            Value::Number(n) => Ok(n.to_string()),
-            _ => Err(Error::InvalidViewDefinition(format!(
-                "unsupported constant value type for {}",
-                c.name
-            ))),
-        };
-    }
-    Err(Error::InvalidViewDefinition(format!(
-        "constant {} has no value",
-        c.name
-    )))
-}
-
-/// A FHIRPath single-quoted string literal (backslash-escaped).
-fn fhirpath_string(s: &str) -> String {
-    format!("'{}'", s.replace('\\', "\\\\").replace('\'', "\\'"))
-}
-
-/// The FHIR temporal type a boundary function operates on, inferred from a
-/// leading `ofType(T)` where present.
-#[derive(Debug, Clone, Copy)]
-enum BoundaryType {
-    Date,
-    DateTime,
-    Time,
-    Unknown,
-}
-
-fn boundary_hint(object: &ExpressionNode) -> BoundaryType {
-    match object {
-        ExpressionNode::MethodCall(m) if m.method == "ofType" => {
-            let name = match m.arguments.first() {
-                Some(ExpressionNode::Identifier(n)) => n.name.to_lowercase(),
-                Some(ExpressionNode::TypeInfo(t)) => t.name.to_lowercase(),
-                _ => return BoundaryType::Unknown,
-            };
-            match name.as_str() {
-                "datetime" | "instant" => BoundaryType::DateTime,
-                "date" => BoundaryType::Date,
-                "time" => BoundaryType::Time,
-                _ => BoundaryType::Unknown,
-            }
-        }
-        ExpressionNode::Parenthesized(e) => boundary_hint(e),
-        _ => BoundaryType::Unknown,
-    }
-}
-
-/// Widen a partial date string `t` to its low/high full-date bound.
-fn date_bound(t: &str, low: bool) -> String {
-    if low {
-        format!(
-            "CASE length({t}) WHEN 4 THEN {t} || '-01-01' WHEN 7 THEN {t} || '-01' ELSE {t} END"
-        )
-    } else {
-        format!(
-            "CASE length({t}) \
-               WHEN 4 THEN {t} || '-12-31' \
-               WHEN 7 THEN to_char(to_date({t}, 'YYYY-MM') + interval '1 month' - interval '1 day', 'YYYY-MM-DD') \
-               ELSE {t} END"
-        )
-    }
-}
-
-/// Widen a partial dateTime string `t`, using the timezone extremes (+14:00 for
-/// the earliest instant, -12:00 for the latest) the spec mandates.
-fn datetime_bound(t: &str, low: bool) -> String {
-    if low {
-        format!(
-            "CASE length({t}) \
-               WHEN 4 THEN {t} || '-01-01T00:00:00.000+14:00' \
-               WHEN 7 THEN {t} || '-01T00:00:00.000+14:00' \
-               WHEN 10 THEN {t} || 'T00:00:00.000+14:00' \
-               ELSE {t} END"
-        )
-    } else {
-        format!(
-            "CASE length({t}) \
-               WHEN 4 THEN {t} || '-12-31T23:59:59.999-12:00' \
-               WHEN 7 THEN to_char(to_date({t}, 'YYYY-MM') + interval '1 month' - interval '1 day', 'YYYY-MM-DD') || 'T23:59:59.999-12:00' \
-               WHEN 10 THEN {t} || 'T23:59:59.999-12:00' \
-               ELSE {t} END"
-        )
-    }
-}
-
-/// Widen a partial time string `t` to its low/high bound.
-fn time_bound(t: &str, low: bool) -> String {
-    if low {
-        format!(
-            "CASE length({t}) WHEN 2 THEN {t} || ':00:00.000' WHEN 5 THEN {t} || ':00.000' WHEN 8 THEN {t} || '.000' ELSE {t} END"
-        )
-    } else {
-        format!(
-            "CASE length({t}) WHEN 2 THEN {t} || ':59:59.999' WHEN 5 THEN {t} || ':59.999' WHEN 8 THEN {t} || '.999' ELSE {t} END"
-        )
-    }
-}
-
-fn capitalize_first(s: &str) -> String {
-    let mut chars = s.chars();
-    match chars.next() {
-        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
-        None => String::new(),
-    }
-}
-
-/// Generated SQL with column metadata.
-#[derive(Debug, Clone)]
-pub struct GeneratedSql {
-    /// The generated SQL query.
-    pub sql: String,
-
-    /// Column information for the result set.
-    pub columns: Vec<GeneratedColumn>,
-
-    /// Common Table Expressions (CTEs) to prepend to the query.
-    pub ctes: Vec<String>,
-}
-
-/// A generated column with its SQL expression and metadata.
-#[derive(Debug, Clone)]
-pub struct GeneratedColumn {
-    /// Original column name from the ViewDefinition.
-    pub name: String,
-
-    /// SQL expression that produces this column's value.
-    pub expression: String,
-
-    /// Alias used in the SQL SELECT clause.
-    pub alias: String,
-
-    /// Data type of the column.
-    pub col_type: ColumnType,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    fn build_sql(view: serde_json::Value) -> GeneratedSql {
-        let v = ViewDefinition::from_json(&view).unwrap();
-        SqlGenerator::new().generate(&v).unwrap()
-    }
-
-    #[test]
-    fn simple_columns() {
-        let g = build_sql(json!({
-            "resource": "Patient",
-            "select": [{ "column": [
-                { "name": "id", "path": "id", "type": "id" },
-                { "name": "gender", "path": "gender", "type": "code" }
-            ] }]
-        }));
-        assert!(g.sql.contains("FROM patient base"));
-        assert_eq!(g.columns.len(), 2);
-        assert_eq!(g.columns[0].name, "id");
-    }
-
-    #[test]
-    fn collection_column_is_json() {
-        let g = build_sql(json!({
-            "resource": "Patient",
-            "select": [{ "column": [
-                { "name": "fam", "path": "name.family", "type": "string", "collection": true }
-            ] }]
-        }));
-        assert_eq!(g.columns[0].col_type, ColumnType::Json);
-    }
-
-    #[test]
-    fn union_shape_mismatch_errors() {
-        let v = ViewDefinition::from_json(&json!({
-            "resource": "Patient",
-            "select": [{ "unionAll": [
-                { "column": [{ "name": "a", "path": "id" }, { "name": "b", "path": "id" }] },
-                { "column": [{ "name": "a", "path": "id" }, { "name": "c", "path": "id" }] }
-            ] }]
-        }))
-        .unwrap();
-        assert!(SqlGenerator::new().generate(&v).is_err());
-    }
-
-    #[test]
-    fn undefined_constant_errors() {
-        let v = ViewDefinition::from_json(&json!({
-            "resource": "Patient",
-            "select": [{ "forEach": "name.where(use = %missing)",
-                "column": [{ "name": "f", "path": "family" }] }]
-        }))
-        .unwrap();
-        assert!(SqlGenerator::new().generate(&v).is_err());
-    }
-
-    #[test]
-    fn missing_resource_errors() {
-        let v = ViewDefinition::from_json(&json!({
-            "resource": "",
-            "select": [{ "column": [{ "name": "id", "path": "id" }] }]
-        }))
-        .unwrap();
-        assert!(SqlGenerator::new().generate(&v).is_err());
     }
 }
