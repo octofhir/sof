@@ -511,6 +511,8 @@ dependencies = [
 [[package]]
 name = "banshee_hir"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ab1ec74eba8154509d686a153df3ef6ff36e32026c9fa6e49fa3b54f9ec51156"
 dependencies = [
  "banshee_syntax",
  "text-size",
@@ -519,6 +521,8 @@ dependencies = [
 [[package]]
 name = "banshee_lexer"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b0d54a52b734740af1157acad55af75cf383ff488ad24e754499d729e7ac739b"
 dependencies = [
  "banshee_syntax",
  "text-size",
@@ -527,6 +531,8 @@ dependencies = [
 [[package]]
 name = "banshee_parser"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cc98ceb207cf570f2393082f1c6083b784fcc4c1e5cb9992810edc546a4608d1"
 dependencies = [
  "banshee_lexer",
  "banshee_syntax",
@@ -537,6 +543,8 @@ dependencies = [
 [[package]]
 name = "banshee_syntax"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e78e016fed78ba0ec7a3a03ac8462405b8a4ef77bad835da84194dcc99a9c4fd"
 dependencies = [
  "cstree",
  "phf 0.13.1",

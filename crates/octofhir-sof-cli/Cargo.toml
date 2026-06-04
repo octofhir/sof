@@ -7,6 +7,9 @@ repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
 description = "Command-line interface for octofhir-sof (SQL on FHIR)"
+readme = "../../README.md"
+keywords = ["fhir", "sql-on-fhir", "healthcare", "cli", "viewdefinition"]
+categories = ["command-line-utilities", "database"]
 
 [[bin]]
 name = "octofhir-sof"
