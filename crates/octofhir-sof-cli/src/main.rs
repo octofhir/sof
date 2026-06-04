@@ -273,6 +273,50 @@ fn load_file(path: &PathBuf, out: &mut Vec<serde_json::Value>) -> Result<()> {
     Ok(())
 }
 
+/// Stream NDJSON input through a compiled view, writing NDJSON rows as they are
+/// produced. Reads one line at a time and never holds the whole input or output
+/// in memory. Returns the number of rows written.
+fn stream_ndjson(view: &ViewDefinition, input: &PathBuf, sink: &mut dyn Write) -> Result<usize> {
+    use std::io::BufRead;
+
+    let compiled = octofhir_sof::CompiledView::compile(view).context("compiling view")?;
+    let reader: Box<dyn BufRead> = if input.as_os_str() == "-" {
+        Box::new(io::BufReader::new(io::stdin()))
+    } else {
+        Box::new(io::BufReader::new(
+            fs::File::open(input).with_context(|| format!("opening {}", input.display()))?,
+        ))
+    };
+
+    let names: Vec<String> = compiled.columns().iter().map(|c| c.name.clone()).collect();
+    let mut total = 0;
+    for (i, line) in reader.lines().enumerate() {
+        let line = line.with_context(|| format!("reading line {}", i + 1))?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let value: serde_json::Value =
+            serde_json::from_str(&line).with_context(|| format!("parsing line {}", i + 1))?;
+        // Expand a Bundle/array line into its resources.
+        let mut resources = Vec::new();
+        push_resource(value, &mut resources);
+        for resource in &resources {
+            for row in compiled.execute_resource(resource)? {
+                let obj: serde_json::Map<String, serde_json::Value> = names
+                    .iter()
+                    .cloned()
+                    .zip(row)
+                    .filter(|(_, v)| !v.is_null())
+                    .collect();
+                writeln!(sink, "{}", serde_json::Value::Object(obj))
+                    .context("writing NDJSON row")?;
+                total += 1;
+            }
+        }
+    }
+    Ok(total)
+}
+
 /// Parse resource text of unknown shape: a single JSON value (object, array or
 /// Bundle) if it parses whole, otherwise NDJSON (one JSON value per line). Used
 /// for stdin, where there is no filename extension to disambiguate.
@@ -520,6 +564,28 @@ async fn run(cli: Cli, color: bool) -> Result<()> {
             // A directory of ViewDefinitions runs every view in one pass, writing
             // one output file per view into the --out directory.
             let multi = view.is_dir();
+
+            // Fast path: a single view, NDJSON input (file or stdin) and NDJSON
+            // output stream resource-by-resource in bounded memory.
+            let ndjson_in = input.as_ref().is_some_and(|p| {
+                p.as_os_str() == "-" || p.extension().is_some_and(|x| x == "ndjson")
+            });
+            if !multi && output.eq_ignore_ascii_case("ndjson") && ndjson_in {
+                let view = load_view(&view)?;
+                let path = input.expect("checked above");
+                let mut sink: Box<dyn Write> = match &out {
+                    Some(path) => Box::new(
+                        fs::File::create(path)
+                            .with_context(|| format!("creating {}", path.display()))?,
+                    ),
+                    None => Box::new(io::stdout().lock()),
+                };
+                let n = stream_ndjson(&view, &path, &mut sink)?;
+                sink.flush().ok();
+                eprintln!("{n} rows");
+                return Ok(());
+            }
+
             let views = load_views(&view)?;
 
             // Acquire the data source once, shared across all views.

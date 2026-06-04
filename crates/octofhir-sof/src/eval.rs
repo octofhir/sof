@@ -30,81 +30,122 @@ use crate::{Error, Result};
 /// column shape is inconsistent (duplicate names, mismatched `unionAll`
 /// branches), or a non-collection column yields more than one value.
 pub fn execute(view: &ViewDefinition, resources: &[Value]) -> Result<ViewResult> {
-    if view.resource.trim().is_empty() {
-        return Err(Error::InvalidViewDefinition(
-            "ViewDefinition is missing the required `resource`".to_string(),
-        ));
-    }
-    let constants = build_constants(view)?;
-    let ev = Evaluator {
-        resource_type: view.resource.clone(),
-        constants,
-    };
-
-    let shape = ev.shape(&view.select)?;
-    if shape.is_empty() {
-        return Err(Error::InvalidViewDefinition(
-            "ViewDefinition produces no columns".to_string(),
-        ));
-    }
-    let mut seen = std::collections::HashSet::new();
-    for (name, _) in &shape {
-        if !seen.insert(name.clone()) {
-            return Err(Error::InvalidViewDefinition(format!(
-                "column `{name}` is defined more than once"
-            )));
-        }
-    }
-
-    let where_asts = view
-        .where_
-        .iter()
-        .map(|w| ev.parse(&w.path))
-        .collect::<Result<Vec<_>>>()?;
-
-    let mut rows: Vec<Map<String, Value>> = Vec::new();
+    let compiled = CompiledView::compile(view)?;
+    let mut data: Vec<Vec<Value>> = Vec::new();
     for resource in resources {
-        if resource.get("resourceType").and_then(Value::as_str) != Some(ev.resource_type.as_str()) {
-            continue;
-        }
-        let mut keep = true;
-        for ast in &where_asts {
-            if !ev.eval_where(ast, resource)? {
-                keep = false;
-                break;
-            }
-        }
-        if !keep {
-            continue;
-        }
-
-        let mut combos = vec![Map::new()];
-        for select in &view.select {
-            let srows = ev.eval_select(select, resource, 0)?;
-            combos = cartesian(&combos, &srows);
-        }
-        rows.extend(combos);
+        data.extend(compiled.execute_resource(resource)?);
     }
-
-    let columns: Vec<ColumnInfo> = shape
-        .iter()
-        .map(|(name, ty)| ColumnInfo::new(name.clone(), *ty))
-        .collect();
-    let data: Vec<Vec<Value>> = rows
-        .iter()
-        .map(|row| {
-            shape
-                .iter()
-                .map(|(name, _)| row.get(name).cloned().unwrap_or(Value::Null))
-                .collect()
-        })
-        .collect();
     let row_count = data.len();
     Ok(ViewResult {
-        columns,
+        columns: compiled.columns().to_vec(),
         data,
         row_count,
     })
+}
+
+/// A ViewDefinition compiled once for repeated, resource-at-a-time execution.
+///
+/// Validates the view (columns, name collisions, constants) up front, then lets
+/// callers stream resources through [`CompiledView::execute_resource`] without
+/// holding the whole dataset in memory.
+pub struct CompiledView {
+    ev: Evaluator,
+    selects: Vec<SelectColumn>,
+    where_asts: Vec<ExpressionNode>,
+    shape: Vec<(String, ColumnType)>,
+    columns: Vec<ColumnInfo>,
+}
+
+impl CompiledView {
+    /// Compile and validate a ViewDefinition.
+    pub fn compile(view: &ViewDefinition) -> Result<Self> {
+        if view.resource.trim().is_empty() {
+            return Err(Error::InvalidViewDefinition(
+                "ViewDefinition is missing the required `resource`".to_string(),
+            ));
+        }
+        let constants = build_constants(view)?;
+        let ev = Evaluator {
+            resource_type: view.resource.clone(),
+            constants,
+        };
+
+        let shape = ev.shape(&view.select)?;
+        if shape.is_empty() {
+            return Err(Error::InvalidViewDefinition(
+                "ViewDefinition produces no columns".to_string(),
+            ));
+        }
+        let mut seen = std::collections::HashSet::new();
+        for (name, _) in &shape {
+            if !seen.insert(name.clone()) {
+                return Err(Error::InvalidViewDefinition(format!(
+                    "column `{name}` is defined more than once"
+                )));
+            }
+        }
+
+        let where_asts = view
+            .where_
+            .iter()
+            .map(|w| ev.parse(&w.path))
+            .collect::<Result<Vec<_>>>()?;
+
+        let columns = shape
+            .iter()
+            .map(|(name, ty)| ColumnInfo::new(name.clone(), *ty))
+            .collect();
+
+        Ok(Self {
+            ev,
+            selects: view.select.clone(),
+            where_asts,
+            shape,
+            columns,
+        })
+    }
+
+    /// The output columns, in order.
+    pub fn columns(&self) -> &[ColumnInfo] {
+        &self.columns
+    }
+
+    /// The FHIR resource type this view selects from.
+    pub fn resource_type(&self) -> &str {
+        &self.ev.resource_type
+    }
+
+    /// Evaluate the view against a single resource, returning its rows (column
+    /// values in column order). Resources of a different type, or filtered out
+    /// by `where`, yield no rows.
+    pub fn execute_resource(&self, resource: &Value) -> Result<Vec<Vec<Value>>> {
+        if resource.get("resourceType").and_then(Value::as_str)
+            != Some(self.ev.resource_type.as_str())
+        {
+            return Ok(Vec::new());
+        }
+        for ast in &self.where_asts {
+            if !self.ev.eval_where(ast, resource)? {
+                return Ok(Vec::new());
+            }
+        }
+
+        let mut combos = vec![Map::new()];
+        for select in &self.selects {
+            let srows = self.ev.eval_select(select, resource, 0)?;
+            combos = cartesian(&combos, &srows);
+        }
+
+        Ok(combos
+            .iter()
+            .map(|row| {
+                self.shape
+                    .iter()
+                    .map(|(name, _)| row.get(name).cloned().unwrap_or(Value::Null))
+                    .collect()
+            })
+            .collect())
+    }
 }
 
 /// The cartesian product of two row sets, merging each pair of maps.
