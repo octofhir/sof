@@ -168,9 +168,9 @@ enum Source {
 /// Execute a single view against the resolved source.
 async fn run_view(source: &Source, view: &ViewDefinition) -> Result<ViewResult> {
     match source {
-        Source::Files(resources) => {
-            octofhir_sof::execute(view, resources).context("executing view")
-        }
+        Source::Files(resources) => octofhir_sof::execute(view, resources)
+            .await
+            .context("executing view"),
         Source::Db(pool) => ViewRunner::new(pool.clone())
             .run(view)
             .await
@@ -289,10 +289,16 @@ fn load_file(path: &PathBuf, out: &mut Vec<serde_json::Value>) -> Result<()> {
 /// Stream NDJSON input through a compiled view, writing NDJSON rows as they are
 /// produced. Reads one line at a time and never holds the whole input or output
 /// in memory. Returns the number of rows written.
-fn stream_ndjson(view: &ViewDefinition, input: &PathBuf, sink: &mut dyn Write) -> Result<usize> {
+async fn stream_ndjson(
+    view: &ViewDefinition,
+    input: &PathBuf,
+    sink: &mut dyn Write,
+) -> Result<usize> {
     use std::io::BufRead;
 
-    let compiled = octofhir_sof::CompiledView::compile(view).context("compiling view")?;
+    let compiled = octofhir_sof::CompiledView::compile(view)
+        .await
+        .context("compiling view")?;
     let reader: Box<dyn BufRead> = if input.as_os_str() == "-" {
         Box::new(io::BufReader::new(io::stdin()))
     } else {
@@ -314,7 +320,7 @@ fn stream_ndjson(view: &ViewDefinition, input: &PathBuf, sink: &mut dyn Write) -
         let mut resources = Vec::new();
         push_resource(value, &mut resources);
         for resource in &resources {
-            for row in compiled.execute_resource(resource)? {
+            for row in compiled.execute_resource(resource).await? {
                 let obj: serde_json::Map<String, serde_json::Value> = names
                     .iter()
                     .cloned()
@@ -423,7 +429,7 @@ fn run_one_test(test: &serde_json::Value, resources: &[serde_json::Value]) -> (b
         Ok(v) => v,
         Err(e) => return (expect_error, format!("parse error: {e}")),
     };
-    let result = match octofhir_sof::execute(&view, resources) {
+    let result = match octofhir_sof::execute_blocking(&view, resources) {
         Ok(r) => r,
         Err(e) => return (expect_error, format!("execute error: {e}")),
     };
@@ -594,7 +600,7 @@ async fn run(cli: Cli, color: bool) -> Result<()> {
                     ),
                     None => Box::new(io::stdout().lock()),
                 };
-                let n = stream_ndjson(&view, &path, &mut sink)?;
+                let n = stream_ndjson(&view, &path, &mut sink).await?;
                 sink.flush().ok();
                 eprintln!("{n} rows");
                 return Ok(());

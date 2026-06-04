@@ -1,17 +1,32 @@
 //! In-memory ViewDefinition execution.
 //!
 //! Evaluates a [`ViewDefinition`] directly against FHIR resources held as
-//! `serde_json::Value`, with no database. It parses selectors with the real
-//! `octofhir-fhirpath` parser and walks the AST over JSON, mirroring the
-//! collection semantics of the SQL generator (every sub-expression yields a
-//! FHIRPath collection — a `Vec<Value>` — so a singleton and a one-element
-//! collection behave identically and navigation flattens arrays). The same view
-//! therefore produces the same rows whether run in Postgres or here.
+//! `serde_json::Value`, with no database. Per-expression FHIRPath evaluation is
+//! delegated to the real `octofhir-fhirpath` [`FhirPathEngine`], so the full
+//! FHIRPath function set (`substring`, `upper`, math, etc.) is available —
+//! unlike the hand-lowered subset used by the SQL generator.
+//!
+//! What stays in this module is the SQL-on-FHIR *relational orchestration* that
+//! is not plain FHIRPath: `forEach`/`forEachOrNull`, nested `select` cartesian
+//! products, `unionAll`, `repeat` (preorder transitive closure), column
+//! ordering, the scalar-vs-collection column rule, and the boolean-`where`
+//! rule. The SoF-specific functions `getResourceKey()` / `getReferenceKey()`
+//! are registered as custom functions on the engine's registry so they can be
+//! used anywhere in an expression (including over `contained[]`).
 
-use std::cell::RefCell;
-use std::collections::HashMap;
+use std::sync::Arc;
 
-use octofhir_fhirpath::{BinaryOperator, ExpressionNode, LiteralValue, UnaryOperator, parse_ast};
+use async_trait::async_trait;
+use octofhir_fhirpath::core::error_code::FP0053;
+use octofhir_fhirpath::evaluator::AsyncNodeEvaluator;
+use octofhir_fhirpath::evaluator::function_registry::{
+    EmptyPropagation, FunctionCategory, FunctionMetadata, FunctionSignature, LazyFunctionEvaluator,
+    PureFunctionEvaluator,
+};
+use octofhir_fhirpath::{
+    Collection, EmptyModelProvider, EvaluationContext, ExpressionNode, FhirPathEngine,
+    FhirPathError, FhirPathValue, ModelProvider, create_function_registry,
+};
 use serde_json::{Map, Value};
 
 use crate::column::{ColumnInfo, ColumnType};
@@ -30,11 +45,11 @@ use crate::{Error, Result};
 /// Returns an error if a selector cannot be parsed, a constant is undefined, the
 /// column shape is inconsistent (duplicate names, mismatched `unionAll`
 /// branches), or a non-collection column yields more than one value.
-pub fn execute(view: &ViewDefinition, resources: &[Value]) -> Result<ViewResult> {
-    let compiled = CompiledView::compile(view)?;
+pub async fn execute(view: &ViewDefinition, resources: &[Value]) -> Result<ViewResult> {
+    let compiled = CompiledView::compile(view).await?;
     let mut data: Vec<Vec<Value>> = Vec::new();
     for resource in resources {
-        data.extend(compiled.execute_resource(resource)?);
+        data.extend(compiled.execute_resource(resource).await?);
     }
     let row_count = data.len();
     Ok(ViewResult {
@@ -44,32 +59,74 @@ pub fn execute(view: &ViewDefinition, resources: &[Value]) -> Result<ViewResult>
     })
 }
 
+/// Blocking convenience wrapper around [`execute`] for non-async callers.
+///
+/// Spins up a fresh current-thread Tokio runtime on a dedicated thread, so it is
+/// safe to call from synchronous code even when an outer runtime exists. Async
+/// callers should use [`execute`] directly.
+///
+/// # Errors
+///
+/// Same as [`execute`].
+pub fn execute_blocking(view: &ViewDefinition, resources: &[Value]) -> Result<ViewResult> {
+    std::thread::scope(|s| {
+        s.spawn(|| {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| Error::FhirPath(format!("building runtime: {e}")))?;
+            rt.block_on(execute(view, resources))
+        })
+        .join()
+        .map_err(|_| Error::FhirPath("evaluation thread panicked".to_string()))?
+    })
+}
+
 /// A ViewDefinition compiled once for repeated, resource-at-a-time execution.
 ///
-/// Validates the view (columns, name collisions, constants) up front, then lets
-/// callers stream resources through [`CompiledView::execute_resource`] without
-/// holding the whole dataset in memory.
+/// Validates the view (columns, name collisions, constants) up front and builds
+/// the FHIRPath engine once, then lets callers stream resources through
+/// [`CompiledView::execute_resource`] without holding the whole dataset in
+/// memory.
 pub struct CompiledView {
     ev: Evaluator,
     selects: Vec<SelectColumn>,
-    where_asts: Vec<ExpressionNode>,
+    where_paths: Vec<String>,
     shape: Vec<(String, ColumnType)>,
     columns: Vec<ColumnInfo>,
 }
 
 impl CompiledView {
-    /// Compile and validate a ViewDefinition.
-    pub fn compile(view: &ViewDefinition) -> Result<Self> {
+    /// Compile and validate a ViewDefinition, building the FHIRPath engine.
+    pub async fn compile(view: &ViewDefinition) -> Result<Self> {
         if view.resource.trim().is_empty() {
             return Err(Error::InvalidViewDefinition(
                 "ViewDefinition is missing the required `resource`".to_string(),
             ));
         }
         let constants = build_constants(view)?;
+
+        // Build the engine once with the SoF custom functions registered. No
+        // network, no FHIR package: EmptyModelProvider keeps the library
+        // self-contained (ofType choice resolution is handled by string rewrite
+        // below, not by the model provider).
+        let mut registry = create_function_registry();
+        registry.register_lazy_function(Arc::new(GetResourceKey));
+        registry.register_lazy_function(Arc::new(GetReferenceKey));
+        // SoF-divergent function semantics: override the engine's defaults to
+        // match the SQL-on-FHIR conformance suite (join() with no separator,
+        // and the spec's precision-boundary rules for low/highBoundary).
+        registry.register_pure_function(Arc::new(JoinFn));
+        let model: Arc<dyn ModelProvider + Send + Sync> = Arc::new(EmptyModelProvider);
+        let engine = FhirPathEngine::new(Arc::new(registry), model.clone())
+            .await
+            .map_err(|e| Error::FhirPath(format!("building FHIRPath engine: {e}")))?;
+
         let ev = Evaluator {
             resource_type: view.resource.clone(),
             constants,
-            root: RefCell::new(Value::Null),
+            engine,
+            model,
         };
 
         let shape = ev.shape(&view.select)?;
@@ -87,10 +144,12 @@ impl CompiledView {
             }
         }
 
-        let where_asts = view
+        // Validate/normalize every where path up front (constants + ofType
+        // rewrite), so per-resource evaluation just hands strings to the engine.
+        let where_paths = view
             .where_
             .iter()
-            .map(|w| ev.parse(&w.path))
+            .map(|w| ev.prepare(&w.path))
             .collect::<Result<Vec<_>>>()?;
 
         let columns = shape
@@ -101,7 +160,7 @@ impl CompiledView {
         Ok(Self {
             ev,
             selects: view.select.clone(),
-            where_asts,
+            where_paths,
             shape,
             columns,
         })
@@ -120,22 +179,21 @@ impl CompiledView {
     /// Evaluate the view against a single resource, returning its rows (column
     /// values in column order). Resources of a different type, or filtered out
     /// by `where`, yield no rows.
-    pub fn execute_resource(&self, resource: &Value) -> Result<Vec<Vec<Value>>> {
+    pub async fn execute_resource(&self, resource: &Value) -> Result<Vec<Vec<Value>>> {
         if resource.get("resourceType").and_then(Value::as_str)
             != Some(self.ev.resource_type.as_str())
         {
             return Ok(Vec::new());
         }
-        self.ev.set_root(resource);
-        for ast in &self.where_asts {
-            if !self.ev.eval_where(ast, resource)? {
+        for path in &self.where_paths {
+            if !self.ev.eval_where(path, resource).await? {
                 return Ok(Vec::new());
             }
         }
 
         let mut combos = vec![Map::new()];
         for select in &self.selects {
-            let srows = self.ev.eval_select(select, resource, 0)?;
+            let srows = self.ev.eval_select(select, resource, 0).await?;
             combos = cartesian(&combos, &srows);
         }
 
@@ -168,78 +226,63 @@ fn cartesian(a: &[Map<String, Value>], b: &[Map<String, Value>]) -> Vec<Map<Stri
 
 struct Evaluator {
     resource_type: String,
-    constants: HashMap<String, String>,
-    /// The resource currently being evaluated. Fragment (`#id`) references
-    /// resolve against its `contained[]`, so getReferenceKey can key contained
-    /// resources as independent resources (per the SQL-on-FHIR functional
-    /// model). Set per resource by [`Evaluator::set_root`].
-    root: RefCell<Value>,
+    constants: std::collections::HashMap<String, String>,
+    engine: FhirPathEngine,
+    model: Arc<dyn ModelProvider + Send + Sync>,
 }
 
 impl Evaluator {
-    fn parse(&self, path: &str) -> Result<ExpressionNode> {
+    /// Normalize a FHIRPath path string for the engine: substitute view
+    /// constants (`%name`) into the string, then rewrite `ofType()` over FHIR
+    /// choice elements (the engine, on an `EmptyModelProvider`, cannot map
+    /// `value.ofType(Quantity)` → `valueQuantity` itself).
+    fn prepare(&self, path: &str) -> Result<String> {
         let substituted = substitute_constants(path, &self.constants)?;
-        parse_ast(&substituted).map_err(|e| Error::FhirPath(e.to_string()))
+        Ok(rewrite_of_type(&substituted))
     }
 
-    /// Record the resource being evaluated so fragment references can resolve
-    /// against its `contained[]`.
-    fn set_root(&self, resource: &Value) {
-        *self.root.borrow_mut() = resource.clone();
+    /// Evaluate a (prepared) FHIRPath expression against `focus`, with
+    /// `%rowIndex` bound to `rid`, returning the result as a FHIRPath collection
+    /// of JSON values.
+    async fn eval_prepared(&self, path: &str, focus: &Value, rid: i64) -> Result<Vec<Value>> {
+        let ctx = EvaluationContext::new(
+            Collection::from(vec![FhirPathValue::resource(focus.clone())]),
+            self.model.clone(),
+            None,
+            None,
+            None,
+        );
+        // %rowIndex: the engine resolves `%rowIndex` by stripping `%` and
+        // looking up `rowIndex`.
+        ctx.set_variable("rowIndex".to_string(), FhirPathValue::integer(rid));
+
+        let result = self
+            .engine
+            .evaluate(path, &ctx)
+            .await
+            .map_err(|e| Error::FhirPath(e.to_string()))?;
+
+        Ok(collection_to_json(&result.value))
     }
 
-    /// The `resourceType` of the contained resource with the given local id, if
-    /// the current root carries it in `contained[]`.
-    fn contained_type(&self, local_id: &str) -> Option<String> {
-        self.root
-            .borrow()
-            .get("contained")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .find(|c| c.get("id").and_then(Value::as_str) == Some(local_id))
-            .and_then(|c| c.get("resourceType").and_then(Value::as_str))
-            .map(str::to_string)
-    }
-
-    /// `getReferenceKey()` on a single Reference value. Relative/absolute
-    /// `Type/id` references key on the id (filtered by the optional expected
-    /// type). Fragment `#id` references resolve into the root resource's
-    /// `contained[]` and key on the local id, so the value matches
-    /// `getResourceKey()` on that contained resource. Absolute URL and `urn:`
-    /// references are not keyed.
-    fn reference_key(&self, item: &Value, want_type: Option<&str>) -> Option<String> {
-        let reference = item.get("reference")?.as_str()?;
-        if let Some(local) = reference.strip_prefix('#') {
-            if local.is_empty() {
-                return None;
-            }
-            // The contained resource's actual type — from its declaration in
-            // contained[], else the Reference.type element. A type filter that
-            // can't be confirmed yields the empty collection.
-            let actual = self
-                .contained_type(local)
-                .or_else(|| item.get("type").and_then(Value::as_str).map(str::to_string));
-            return match (want_type, actual.as_deref()) {
-                (Some(t), Some(a)) if t != a => None,
-                (Some(_), None) => None,
-                _ => Some(local.to_string()),
-            };
+    /// Prepare and evaluate a path in one step.
+    ///
+    /// `lowBoundary()`/`highBoundary()` diverge from the engine's stock
+    /// behaviour, so they are intercepted here: the base is evaluated by the
+    /// engine and the SoF precision-boundary rules are applied to each value.
+    /// The temporal flavour (`date`/`dateTime`/`time`) is taken from a leading
+    /// `ofType(T)` on the base before the `ofType` rewrite collapses it.
+    async fn eval_path(&self, path: &str, focus: &Value, rid: i64) -> Result<Vec<Value>> {
+        if let Some((base, low, hint)) = boundary_call(path) {
+            let base_vals = Box::pin(self.eval_path(&base, focus, rid)).await?;
+            return Ok(base_vals
+                .iter()
+                .map(|v| boundary(v, low, hint))
+                .filter(|v| !v.is_null())
+                .collect());
         }
-        if reference.starts_with("urn:") || reference.contains("://") {
-            return None;
-        }
-        let trimmed = reference.trim_start_matches('/');
-        let mut parts = trimmed.split('/');
-        let rtype = parts.next()?;
-        let id = parts.next()?;
-        if id.is_empty() {
-            return None;
-        }
-        match want_type {
-            Some(t) if t != rtype => None,
-            _ => Some(id.to_string()),
-        }
+        let prepared = self.prepare(path)?;
+        self.eval_prepared(&prepared, focus, rid).await
     }
 
     /// The ordered column shape of a select list, validating `unionAll` branch
@@ -284,7 +327,7 @@ impl Evaluator {
     }
 
     /// Evaluate a select node against a focus value, yielding partial rows.
-    fn eval_select(
+    async fn eval_select(
         &self,
         select: &SelectColumn,
         ctx: &Value,
@@ -297,23 +340,22 @@ impl Evaluator {
         // by transitively re-applying the repeat path(s) (preorder, the focus
         // node itself excluded). %rowIndex tracks position in the flattened list.
         if !select.repeat.is_empty() {
-            let asts = select
+            let paths = select
                 .repeat
                 .iter()
-                .map(|p| self.parse(p))
+                .map(|p| self.prepare(p))
                 .collect::<Result<Vec<_>>>()?;
             let mut foci = Vec::new();
-            self.repeat_collect(&asts, ctx, &mut foci)?;
+            self.repeat_collect(&paths, ctx, &mut foci).await?;
             let mut rows = Vec::new();
             for (idx, focus) in foci.iter().enumerate() {
-                rows.extend(self.eval_level(select, focus, idx as i64)?);
+                rows.extend(Box::pin(self.eval_level(select, focus, idx as i64)).await?);
             }
             return Ok(rows);
         }
 
         if let Some(path) = for_each.or(for_each_or_null) {
-            let ast = self.parse(path)?;
-            let elements = self.eval_coll(&ast, ctx, rid)?;
+            let elements = self.eval_path(path, ctx, rid).await?;
             if elements.is_empty() {
                 if for_each_or_null.is_some() {
                     return Ok(vec![self.null_row(select)]);
@@ -322,17 +364,17 @@ impl Evaluator {
             }
             let mut rows = Vec::new();
             for (idx, elem) in elements.iter().enumerate() {
-                rows.extend(self.eval_level(select, elem, idx as i64)?);
+                rows.extend(Box::pin(self.eval_level(select, elem, idx as i64)).await?);
             }
             Ok(rows)
         } else {
-            self.eval_level(select, ctx, rid)
+            self.eval_level(select, ctx, rid).await
         }
     }
 
     /// Evaluate this select's columns, nested selects and unionAll against an
     /// already-focused value (after any forEach has selected the element).
-    fn eval_level(
+    async fn eval_level(
         &self,
         select: &SelectColumn,
         ctx: &Value,
@@ -341,20 +383,20 @@ impl Evaluator {
         let mut own = Map::new();
         if let Some(columns) = &select.column {
             for col in columns {
-                own.insert(col.name.clone(), self.column_value(col, ctx, rid)?);
+                own.insert(col.name.clone(), self.column_value(col, ctx, rid).await?);
             }
         }
         let mut combos = vec![own];
 
         for nested in &select.select {
-            let nrows = self.eval_select(nested, ctx, rid)?;
+            let nrows = Box::pin(self.eval_select(nested, ctx, rid)).await?;
             combos = cartesian(&combos, &nrows);
         }
 
         if let Some(branches) = &select.union_all {
             let mut branch_rows = Vec::new();
             for branch in branches {
-                branch_rows.extend(self.eval_select(branch, ctx, rid)?);
+                branch_rows.extend(Box::pin(self.eval_select(branch, ctx, rid)).await?);
             }
             combos = cartesian(&combos, &branch_rows);
         }
@@ -365,16 +407,30 @@ impl Evaluator {
     /// Preorder transitive closure of the `repeat` path(s): apply every path to
     /// `node`, push each result, then recurse into it. The starting node itself
     /// is not emitted.
-    fn repeat_collect(
+    async fn repeat_collect(
         &self,
-        paths: &[ExpressionNode],
+        paths: &[String],
         node: &Value,
         out: &mut Vec<Value>,
     ) -> Result<()> {
-        for ast in paths {
-            for child in self.eval_coll(ast, node, 0)? {
-                out.push(child.clone());
-                self.repeat_collect(paths, &child, out)?;
+        // Iterative worklist (preorder) to avoid recursive async lifetimes.
+        let mut stack: Vec<Value> = Vec::new();
+        // Seed in reverse so that, popped LIFO, children come out in source order.
+        let mut seed = Vec::new();
+        for path in paths {
+            seed.extend(self.eval_prepared(path, node, 0).await?);
+        }
+        for child in seed.into_iter().rev() {
+            stack.push(child);
+        }
+        while let Some(current) = stack.pop() {
+            out.push(current.clone());
+            let mut children = Vec::new();
+            for path in paths {
+                children.extend(self.eval_prepared(path, &current, 0).await?);
+            }
+            for child in children.into_iter().rev() {
+                stack.push(child);
             }
         }
         Ok(())
@@ -407,9 +463,8 @@ impl Evaluator {
         }
     }
 
-    fn column_value(&self, col: &Column, ctx: &Value, rid: i64) -> Result<Value> {
-        let ast = self.parse(&col.path)?;
-        let values = self.eval_coll(&ast, ctx, rid)?;
+    async fn column_value(&self, col: &Column, ctx: &Value, rid: i64) -> Result<Value> {
+        let values = self.eval_path(&col.path, ctx, rid).await?;
         if col.collection.unwrap_or(false) {
             return Ok(Value::Array(values));
         }
@@ -423,193 +478,11 @@ impl Evaluator {
         }
     }
 
-    // --- Collection evaluation: every node yields a Vec<Value>. ---
-
-    fn eval_coll(&self, node: &ExpressionNode, ctx: &Value, rid: i64) -> Result<Vec<Value>> {
-        match node {
-            ExpressionNode::Literal(l) => Ok(vec![literal_value(&l.value)]),
-            ExpressionNode::Identifier(n) => {
-                if n.name == self.resource_type {
-                    Ok(vec![ctx.clone()])
-                } else {
-                    Ok(nav(std::slice::from_ref(ctx), &n.name))
-                }
-            }
-            ExpressionNode::Variable(v) => match v.name.as_str() {
-                "this" | "$this" => Ok(vec![ctx.clone()]),
-                "rowIndex" => Ok(vec![Value::Number(rid.into())]),
-                other => Err(Error::InvalidPath(format!("unsupported variable ${other}"))),
-            },
-            ExpressionNode::PropertyAccess(p) => {
-                let base = self.eval_coll(&p.object, ctx, rid)?;
-                Ok(nav(&base, &p.property))
-            }
-            ExpressionNode::IndexAccess(i) => {
-                let base = self.eval_coll(&i.object, ctx, rid)?;
-                let idx = self.int_literal(&i.index)?;
-                Ok(index(&base, idx))
-            }
-            ExpressionNode::MethodCall(m) => {
-                self.method(&m.object, &m.method, &m.arguments, ctx, rid)
-            }
-            ExpressionNode::FunctionCall(f) => {
-                self.apply(&f.name, vec![ctx.clone()], &f.arguments, ctx, rid)
-            }
-            ExpressionNode::Filter(fl) => {
-                let base = self.eval_coll(&fl.base, ctx, rid)?;
-                self.filter(base, &fl.condition, rid)
-            }
-            ExpressionNode::Union(u) => {
-                let mut left = self.eval_coll(&u.left, ctx, rid)?;
-                let right = self.eval_coll(&u.right, ctx, rid)?;
-                left.extend(right);
-                Ok(left)
-            }
-            ExpressionNode::Parenthesized(e) => self.eval_coll(e, ctx, rid),
-            ExpressionNode::TypeCast(c) => self.eval_coll(&c.expression, ctx, rid),
-            ExpressionNode::BinaryOperation(_) | ExpressionNode::UnaryOperation(_) => {
-                match self.eval_value(node, ctx, rid)? {
-                    Some(v) => Ok(vec![v]),
-                    None => Ok(Vec::new()),
-                }
-            }
-            ExpressionNode::Collection(c) => {
-                let mut out = Vec::new();
-                for e in &c.elements {
-                    out.extend(self.eval_coll(e, ctx, rid)?);
-                }
-                Ok(out)
-            }
-            other => Err(Error::InvalidPath(format!(
-                "unsupported FHIRPath expression: {}",
-                other.node_type()
-            ))),
-        }
-    }
-
-    fn method(
-        &self,
-        object: &ExpressionNode,
-        name: &str,
-        args: &[ExpressionNode],
-        ctx: &Value,
-        rid: i64,
-    ) -> Result<Vec<Value>> {
-        match name {
-            "ofType" => {
-                let arg = args
-                    .first()
-                    .ok_or_else(|| Error::InvalidPath("ofType() requires a type".into()))?;
-                self.of_type(object, arg, ctx, rid)
-            }
-            "not" => {
-                let truthy = self.eval_bool(object, ctx, rid);
-                Ok(match truthy {
-                    Some(b) => vec![Value::Bool(!b)],
-                    None => Vec::new(),
-                })
-            }
-            "lowBoundary" | "highBoundary" => {
-                let hint = boundary_hint(object);
-                let base = self.eval_coll(object, ctx, rid)?;
-                let low = name == "lowBoundary";
-                Ok(base.iter().map(|v| boundary(v, low, hint)).collect())
-            }
-            _ => {
-                let base = self.eval_coll(object, ctx, rid)?;
-                self.apply(name, base, args, ctx, rid)
-            }
-        }
-    }
-
-    /// Functions whose result depends on the object collection.
-    fn apply(
-        &self,
-        name: &str,
-        coll: Vec<Value>,
-        args: &[ExpressionNode],
-        _ctx: &Value,
-        rid: i64,
-    ) -> Result<Vec<Value>> {
-        match name {
-            "first" | "single" => Ok(index(&coll, 0)),
-            "last" => Ok(index(&coll, -1)),
-            "where" => {
-                let cond = args
-                    .first()
-                    .ok_or_else(|| Error::InvalidPath("where() requires an argument".into()))?;
-                self.filter(coll, cond, rid)
-            }
-            "exists" => {
-                let base = match args.first() {
-                    Some(cond) => self.filter(coll, cond, rid)?,
-                    None => coll,
-                };
-                Ok(vec![Value::Bool(!base.is_empty())])
-            }
-            "empty" => Ok(vec![Value::Bool(coll.is_empty())]),
-            "count" => Ok(vec![Value::Number((coll.len() as i64).into())]),
-            "join" => {
-                // join() over an empty collection yields the empty collection
-                // (i.e. null), not an empty string. (FHIR/sql-on-fhir.js fn_join)
-                if coll.is_empty() {
-                    return Ok(vec![]);
-                }
-                let sep = match args.first() {
-                    Some(a) => self.string_arg(a)?,
-                    None => String::new(),
-                };
-                let parts: Vec<String> = coll.iter().map(value_to_string).collect();
-                Ok(vec![Value::String(parts.join(&sep))])
-            }
-            "extension" => {
-                let url = self
-                    .string_arg(args.first().ok_or_else(|| {
-                        Error::InvalidPath("extension() requires a url".into())
-                    })?)?;
-                let exts = nav(&coll, "extension");
-                Ok(exts
-                    .into_iter()
-                    .filter(|e| e.get("url").and_then(Value::as_str) == Some(url.as_str()))
-                    .collect())
-            }
-            "getReferenceKey" => {
-                let want_type = match args.first() {
-                    Some(a) => Some(self.type_name(a)?),
-                    None => None,
-                };
-                Ok(coll
-                    .iter()
-                    .filter_map(|item| self.reference_key(item, want_type.as_deref()))
-                    .map(Value::String)
-                    .collect())
-            }
-            "getResourceKey" => Ok(coll
-                .iter()
-                .filter_map(|item| item.get("id").cloned())
-                .collect()),
-            "lowBoundary" => Ok(coll
-                .iter()
-                .map(|v| boundary(v, true, BoundaryType::Unknown))
-                .collect()),
-            "highBoundary" => Ok(coll
-                .iter()
-                .map(|v| boundary(v, false, BoundaryType::Unknown))
-                .collect()),
-            "toString" => Ok(coll
-                .iter()
-                .map(|v| Value::String(value_to_string(v)))
-                .collect()),
-            other => Err(Error::InvalidPath(format!(
-                "unsupported function {other}()"
-            ))),
-        }
-    }
-
     /// Evaluate a top-level `where` filter. The expression must yield a boolean
-    /// (or empty); a non-boolean result is an error per the spec.
-    fn eval_where(&self, ast: &ExpressionNode, resource: &Value) -> Result<bool> {
-        let coll = self.eval_coll(ast, resource, 0)?;
+    /// (or empty); a non-boolean result is an error per the spec. Empty → row
+    /// excluded.
+    async fn eval_where(&self, path: &str, resource: &Value) -> Result<bool> {
+        let coll = self.eval_prepared(path, resource, 0).await?;
         if coll.is_empty() {
             return Ok(false);
         }
@@ -620,274 +493,301 @@ impl Evaluator {
         }
         Ok(coll.iter().any(|v| v == &Value::Bool(true)))
     }
+}
 
-    fn filter(&self, coll: Vec<Value>, cond: &ExpressionNode, rid: i64) -> Result<Vec<Value>> {
-        Ok(coll
-            .into_iter()
-            .filter(|item| self.eval_bool(cond, item, rid) == Some(true))
-            .collect())
-    }
+/// Convert a FHIRPath [`Collection`] into a flat `Vec` of JSON values, dropping
+/// `null`/empty entries so navigation results round-trip the way the conformance
+/// `expect` multisets assume.
+fn collection_to_json(coll: &Collection) -> Vec<Value> {
+    coll.iter()
+        .map(value_to_json)
+        .filter(|v| !v.is_null())
+        .collect()
+}
 
-    fn of_type(
-        &self,
-        object: &ExpressionNode,
-        type_arg: &ExpressionNode,
-        ctx: &Value,
-        rid: i64,
-    ) -> Result<Vec<Value>> {
-        let tname = capitalize_first(&self.type_name(type_arg)?);
-        match object {
-            ExpressionNode::PropertyAccess(p) => {
-                let base = self.eval_coll(&p.object, ctx, rid)?;
-                Ok(nav(&base, &format!("{}{}", p.property, tname)))
+/// Convert a single [`FhirPathValue`] to JSON. A nested collection flattens
+/// (collection columns are arrays at the row level, not nested here).
+fn value_to_json(v: &FhirPathValue) -> Value {
+    match v {
+        FhirPathValue::Collection(c) => {
+            let items: Vec<Value> = c
+                .iter()
+                .map(value_to_json)
+                .filter(|x| !x.is_null())
+                .collect();
+            if items.len() == 1 {
+                items.into_iter().next().unwrap()
+            } else {
+                Value::Array(items)
             }
-            ExpressionNode::Identifier(idn) if idn.name != self.resource_type => Ok(nav(
-                std::slice::from_ref(ctx),
-                &format!("{}{}", idn.name, tname),
-            )),
-            ExpressionNode::Parenthesized(e) => self.of_type(e, type_arg, ctx, rid),
-            _ => self.eval_coll(object, ctx, rid),
         }
-    }
-
-    // --- Boolean evaluation (three-valued: None = empty). ---
-
-    fn eval_bool(&self, node: &ExpressionNode, ctx: &Value, rid: i64) -> Option<bool> {
-        match node {
-            ExpressionNode::Parenthesized(e) => self.eval_bool(e, ctx, rid),
-            ExpressionNode::UnaryOperation(u) if matches!(u.operator, UnaryOperator::Not) => {
-                self.eval_bool(&u.operand, ctx, rid).map(|b| !b)
-            }
-            ExpressionNode::BinaryOperation(b) => self.eval_binop(b, ctx, rid),
-            ExpressionNode::Literal(l) => match &l.value {
-                LiteralValue::Boolean(b) => Some(*b),
-                _ => None,
-            },
-            _ => match self.scalar(node, ctx, rid) {
-                Some(Value::Bool(b)) => Some(b),
-                Some(Value::Null) | None => None,
-                Some(_) => Some(true),
-            },
-        }
-    }
-
-    fn eval_binop(
-        &self,
-        b: &octofhir_fhirpath::ast::BinaryOperationNode,
-        ctx: &Value,
-        rid: i64,
-    ) -> Option<bool> {
-        use BinaryOperator::*;
-        match b.operator {
-            And => match (
-                self.eval_bool(&b.left, ctx, rid),
-                self.eval_bool(&b.right, ctx, rid),
-            ) {
-                (Some(false), _) | (_, Some(false)) => Some(false),
-                (Some(true), Some(true)) => Some(true),
-                _ => None,
-            },
-            Or => match (
-                self.eval_bool(&b.left, ctx, rid),
-                self.eval_bool(&b.right, ctx, rid),
-            ) {
-                (Some(true), _) | (_, Some(true)) => Some(true),
-                (Some(false), Some(false)) => Some(false),
-                _ => None,
-            },
-            Xor => match (
-                self.eval_bool(&b.left, ctx, rid),
-                self.eval_bool(&b.right, ctx, rid),
-            ) {
-                (Some(l), Some(r)) => Some(l != r),
-                _ => None,
-            },
-            Implies => match (
-                self.eval_bool(&b.left, ctx, rid),
-                self.eval_bool(&b.right, ctx, rid),
-            ) {
-                (Some(false), _) => Some(true),
-                (_, Some(true)) => Some(true),
-                (Some(true), Some(false)) => Some(false),
-                _ => None,
-            },
-            Equal | Equivalent => {
-                let l = self.scalar(&b.left, ctx, rid)?;
-                let r = self.scalar(&b.right, ctx, rid)?;
-                Some(json_eq(&l, &r))
-            }
-            NotEqual | NotEquivalent => {
-                let l = self.scalar(&b.left, ctx, rid)?;
-                let r = self.scalar(&b.right, ctx, rid)?;
-                Some(!json_eq(&l, &r))
-            }
-            LessThan => self.compare(b, ctx, rid).map(|o| o.is_lt()),
-            LessThanOrEqual => self.compare(b, ctx, rid).map(|o| o.is_le()),
-            GreaterThan => self.compare(b, ctx, rid).map(|o| o.is_gt()),
-            GreaterThanOrEqual => self.compare(b, ctx, rid).map(|o| o.is_ge()),
-            _ => None,
-        }
-    }
-
-    fn compare(
-        &self,
-        b: &octofhir_fhirpath::ast::BinaryOperationNode,
-        ctx: &Value,
-        rid: i64,
-    ) -> Option<std::cmp::Ordering> {
-        let l = self.scalar(&b.left, ctx, rid)?;
-        let r = self.scalar(&b.right, ctx, rid)?;
-        json_cmp(&l, &r)
-    }
-
-    /// The single value of an expression (FHIRPath singleton), or `None` if the
-    /// collection is empty.
-    fn scalar(&self, node: &ExpressionNode, ctx: &Value, rid: i64) -> Option<Value> {
-        if let ExpressionNode::Literal(l) = node {
-            return Some(literal_value(&l.value));
-        }
-        self.eval_coll(node, ctx, rid).ok()?.into_iter().next()
-    }
-
-    /// Evaluate a binary/unary expression to a single value (for column paths).
-    fn eval_value(&self, node: &ExpressionNode, ctx: &Value, rid: i64) -> Result<Option<Value>> {
-        match node {
-            ExpressionNode::BinaryOperation(b) => {
-                use BinaryOperator::*;
-                if matches!(
-                    b.operator,
-                    Add | Subtract | Multiply | Divide | Modulo | IntegerDivide
-                ) {
-                    let (Some(l), Some(r)) = (
-                        self.scalar(&b.left, ctx, rid).and_then(as_f64),
-                        self.scalar(&b.right, ctx, rid).and_then(as_f64),
-                    ) else {
-                        return Ok(None);
-                    };
-                    let result = match b.operator {
-                        Add => l + r,
-                        Subtract => l - r,
-                        Multiply => l * r,
-                        Divide => l / r,
-                        Modulo => l % r,
-                        IntegerDivide => (l / r).trunc(),
-                        _ => unreachable!(),
-                    };
-                    return Ok(Some(number_value(result)));
-                }
-                if matches!(b.operator, Concatenate) {
-                    let l = self.scalar(&b.left, ctx, rid).map(|v| value_to_string(&v));
-                    let r = self.scalar(&b.right, ctx, rid).map(|v| value_to_string(&v));
-                    return Ok(Some(Value::String(format!(
-                        "{}{}",
-                        l.unwrap_or_default(),
-                        r.unwrap_or_default()
-                    ))));
-                }
-                Ok(self.eval_bool(node, ctx, rid).map(Value::Bool))
-            }
-            ExpressionNode::UnaryOperation(u) => match u.operator {
-                UnaryOperator::Not => Ok(self.eval_bool(node, ctx, rid).map(Value::Bool)),
-                UnaryOperator::Negate => Ok(self
-                    .scalar(&u.operand, ctx, rid)
-                    .and_then(as_f64)
-                    .map(|v| number_value(-v))),
-                UnaryOperator::Positive => Ok(self
-                    .scalar(&u.operand, ctx, rid)
-                    .and_then(as_f64)
-                    .map(number_value)),
-            },
-            _ => Ok(self.eval_bool(node, ctx, rid).map(Value::Bool)),
-        }
-    }
-
-    fn int_literal(&self, node: &ExpressionNode) -> Result<i64> {
-        match node {
-            ExpressionNode::Literal(l) => match &l.value {
-                LiteralValue::Integer(i) | LiteralValue::Long(i) => Ok(*i),
-                other => Err(Error::InvalidPath(format!(
-                    "expected integer index, got {other}"
-                ))),
-            },
-            ExpressionNode::Parenthesized(e) => self.int_literal(e),
-            other => Err(Error::InvalidPath(format!(
-                "index must be an integer literal, got {}",
-                other.node_type()
-            ))),
-        }
-    }
-
-    fn type_name(&self, node: &ExpressionNode) -> Result<String> {
-        match node {
-            ExpressionNode::Identifier(n) => Ok(n.name.clone()),
-            ExpressionNode::TypeInfo(t) => Ok(t.name.clone()),
-            other => Err(Error::InvalidPath(format!(
-                "expected a type name, got {}",
-                other.node_type()
-            ))),
-        }
-    }
-
-    fn string_arg(&self, node: &ExpressionNode) -> Result<String> {
-        match node {
-            ExpressionNode::Literal(l) => match &l.value {
-                LiteralValue::String(s) => Ok(s.clone()),
-                other => Ok(other.to_string()),
-            },
-            other => Err(Error::InvalidPath(format!(
-                "expected a string literal, got {}",
-                other.node_type()
-            ))),
-        }
+        FhirPathValue::Empty => Value::Null,
+        other => other.to_json_value(),
     }
 }
 
-/// Flatten navigation `coll.prop` across a collection.
-fn nav(coll: &[Value], prop: &str) -> Vec<Value> {
-    let mut out = Vec::new();
-    for item in coll {
-        match item.get(prop) {
-            Some(Value::Array(a)) => {
-                out.extend(a.iter().filter(|v| !v.is_null()).cloned());
+/// Rewrite `<base>.ofType(Type)` so a FHIR choice element collapses onto the
+/// concrete property (`value.ofType(Quantity)` → `valueQuantity`,
+/// `value.ofType(string)` → `valueString`), matching how the SQL generator and
+/// the FHIR JSON representation name choice elements. The type name is
+/// capitalized exactly as the choice-element suffix requires. The engine, on an
+/// `EmptyModelProvider`, cannot do this mapping itself.
+fn rewrite_of_type(path: &str) -> String {
+    let bytes = path.as_bytes();
+    let mut out = String::with_capacity(path.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        // Look for the literal `.ofType(` at position i.
+        if path[i..].starts_with(".ofType(") {
+            // The base identifier is the trailing run of [A-Za-z0-9_] already in
+            // `out`. Pop it so we can fuse the capitalized type onto it.
+            let base_start = out
+                .rfind(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                .map(|p| p + 1)
+                .unwrap_or(0);
+            let base: String = out[base_start..].to_string();
+            // Find the matching close paren for the argument.
+            let arg_start = i + ".ofType(".len();
+            if let Some(rel_close) = path[arg_start..].find(')') {
+                let arg = path[arg_start..arg_start + rel_close].trim();
+                // Only a bare type identifier is a choice rewrite; anything else
+                // (shouldn't occur) is left to the engine.
+                if !base.is_empty() && is_simple_ident(arg) {
+                    out.truncate(base_start);
+                    out.push_str(&base);
+                    out.push_str(&capitalize_first(arg));
+                    i = arg_start + rel_close + 1;
+                    continue;
+                }
             }
-            Some(Value::Null) | None => {}
-            Some(v) => out.push(v.clone()),
         }
+        let ch = path[i..].chars().next().unwrap();
+        out.push(ch);
+        i += ch.len_utf8();
     }
     out
 }
 
-/// FHIRPath indexer over a collection (negative indexes count from the end).
-fn index(coll: &[Value], n: i64) -> Vec<Value> {
-    let len = coll.len() as i64;
-    let idx = if n < 0 { len + n } else { n };
-    if idx >= 0 && (idx as usize) < coll.len() {
-        vec![coll[idx as usize].clone()]
-    } else {
-        Vec::new()
+fn is_simple_ident(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && !s.chars().next().unwrap().is_ascii_digit()
+}
+
+fn capitalize_first(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
     }
 }
 
-fn literal_value(v: &LiteralValue) -> Value {
-    match v {
-        LiteralValue::String(s) => Value::String(s.clone()),
-        LiteralValue::Integer(i) | LiteralValue::Long(i) => Value::Number((*i).into()),
-        LiteralValue::Decimal(d) => d
-            .to_string()
-            .parse::<serde_json::Number>()
-            .map(Value::Number)
-            .unwrap_or(Value::Null),
-        LiteralValue::Boolean(b) => Value::Bool(*b),
-        LiteralValue::Date(_) | LiteralValue::DateTime(_) | LiteralValue::Time(_) => {
-            Value::String(v.to_string().trim_start_matches('@').to_string())
+fn column_type(col: &Column) -> ColumnType {
+    if col.collection.unwrap_or(false) {
+        return ColumnType::Json;
+    }
+    // An `ansi/type` tag explicitly overrides the inferred column type.
+    if let Some(ansi) = ansi_type_tag(col) {
+        return ColumnType::from_ansi_type(ansi);
+    }
+    col.col_type
+        .as_deref()
+        .map(ColumnType::from_fhir_type)
+        .unwrap_or(ColumnType::String)
+}
+
+/// The value of a column's `ansi/type` tag, if present.
+pub(crate) fn ansi_type_tag(col: &Column) -> Option<&str> {
+    col.tag
+        .iter()
+        .find(|t| t.name == "ansi/type")
+        .and_then(|t| t.value.as_deref())
+}
+
+// --- SoF custom FHIRPath functions ---------------------------------------
+//
+// `getResourceKey()` and `getReferenceKey([type])` are SQL-on-FHIR special
+// functions, not standard FHIRPath. They are registered as lazy functions so
+// they can read the evaluation context's root resource (for fragment `#id`
+// references resolving into `contained[]`). The first argument (if any) is a
+// bare type identifier read directly off the AST, never evaluated.
+
+/// The resource type carried by the contained resource with the given local id,
+/// if the root resource lists it under `contained[]`.
+fn contained_type(root: &Value, local_id: &str) -> Option<String> {
+    root.get("contained")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .find(|c| c.get("id").and_then(Value::as_str) == Some(local_id))
+        .and_then(|c| c.get("resourceType").and_then(Value::as_str))
+        .map(str::to_string)
+}
+
+/// `getReferenceKey()` on a single Reference value. Relative/absolute `Type/id`
+/// references key on the id (filtered by the optional expected type). Fragment
+/// `#id` references resolve into the root resource's `contained[]` and key on
+/// the local id, so the value matches `getResourceKey()` on that contained
+/// resource. Absolute URL and `urn:` references are not keyed.
+fn reference_key(item: &Value, root: &Value, want_type: Option<&str>) -> Option<String> {
+    let reference = item.get("reference")?.as_str()?;
+    if let Some(local) = reference.strip_prefix('#') {
+        if local.is_empty() {
+            return None;
         }
-        LiteralValue::Quantity { value, .. } => value
-            .to_string()
-            .parse::<serde_json::Number>()
-            .map(Value::Number)
-            .unwrap_or(Value::Null),
+        let actual = contained_type(root, local)
+            .or_else(|| item.get("type").and_then(Value::as_str).map(str::to_string));
+        return match (want_type, actual.as_deref()) {
+            (Some(t), Some(a)) if t != a => None,
+            (Some(_), None) => None,
+            _ => Some(local.to_string()),
+        };
+    }
+    if reference.starts_with("urn:") || reference.contains("://") {
+        return None;
+    }
+    let trimmed = reference.trim_start_matches('/');
+    let mut parts = trimmed.split('/');
+    let rtype = parts.next()?;
+    let id = parts.next()?;
+    if id.is_empty() {
+        return None;
+    }
+    match want_type {
+        Some(t) if t != rtype => None,
+        _ => Some(id.to_string()),
     }
 }
+
+/// The root resource JSON from the evaluation context, falling back to the
+/// function input if no root is set.
+fn root_json(context: &EvaluationContext, input: &Collection) -> Value {
+    if let Some(root) = context.root_resource_value() {
+        root.to_json_value()
+    } else if let Some(first) = input.first() {
+        first.to_json_value()
+    } else {
+        Value::Null
+    }
+}
+
+struct GetResourceKey;
+
+#[async_trait]
+impl LazyFunctionEvaluator for GetResourceKey {
+    async fn evaluate(
+        &self,
+        input: Collection,
+        _context: &EvaluationContext,
+        _args: Vec<ExpressionNode>,
+        _evaluator: AsyncNodeEvaluator<'_>,
+    ) -> octofhir_fhirpath::Result<octofhir_fhirpath::EvaluationResult> {
+        // getResourceKey() keys a resource on its `id`.
+        let values: Vec<FhirPathValue> = input
+            .iter()
+            .filter_map(|v| {
+                v.to_json_value()
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .map(|id| FhirPathValue::string(id.to_string()))
+            })
+            .collect();
+        Ok(octofhir_fhirpath::EvaluationResult::from_values(values))
+    }
+
+    fn metadata(&self) -> &FunctionMetadata {
+        static META: std::sync::LazyLock<FunctionMetadata> =
+            std::sync::LazyLock::new(|| sof_fn_metadata("getResourceKey", 0, Some(0)));
+        &META
+    }
+}
+
+struct GetReferenceKey;
+
+#[async_trait]
+impl LazyFunctionEvaluator for GetReferenceKey {
+    async fn evaluate(
+        &self,
+        input: Collection,
+        context: &EvaluationContext,
+        args: Vec<ExpressionNode>,
+        _evaluator: AsyncNodeEvaluator<'_>,
+    ) -> octofhir_fhirpath::Result<octofhir_fhirpath::EvaluationResult> {
+        // Optional bare type identifier, read directly off the AST (not
+        // evaluated): getReferenceKey(Patient).
+        let want_type = match args.first() {
+            Some(node) => Some(ast_type_name(node)?),
+            None => None,
+        };
+        let root = root_json(context, &input);
+        let values: Vec<FhirPathValue> = input
+            .iter()
+            .filter_map(|v| reference_key(&v.to_json_value(), &root, want_type.as_deref()))
+            .map(FhirPathValue::string)
+            .collect();
+        Ok(octofhir_fhirpath::EvaluationResult::from_values(values))
+    }
+
+    fn metadata(&self) -> &FunctionMetadata {
+        static META: std::sync::LazyLock<FunctionMetadata> =
+            std::sync::LazyLock::new(|| sof_fn_metadata("getReferenceKey", 0, Some(1)));
+        &META
+    }
+}
+
+/// Extract a bare type name from an argument node (`Patient`, `Organization`,
+/// or a `System.String`-style qualified type). Errors on anything else.
+fn ast_type_name(node: &ExpressionNode) -> octofhir_fhirpath::Result<String> {
+    match node {
+        ExpressionNode::Identifier(n) => Ok(n.name.clone()),
+        ExpressionNode::TypeInfo(t) => Ok(t.name.clone()),
+        ExpressionNode::PropertyAccess(p) => match p.object.as_ref() {
+            // Qualified type name like FHIR.Patient — take the trailing segment.
+            ExpressionNode::Identifier(_) => Ok(p.property.clone()),
+            _ => Err(FhirPathError::evaluation_error(
+                FP0053,
+                "getReferenceKey() type argument must be a type name",
+            )),
+        },
+        _ => Err(FhirPathError::evaluation_error(
+            FP0053,
+            "getReferenceKey() type argument must be a type name",
+        )),
+    }
+}
+
+/// Minimal metadata for a SoF custom function (polymorphic input, no model or
+/// terminology dependency).
+fn sof_fn_metadata(name: &str, min: usize, max: Option<usize>) -> FunctionMetadata {
+    FunctionMetadata {
+        name: name.to_string(),
+        description: format!("SQL-on-FHIR {name}()"),
+        signature: FunctionSignature {
+            input_type: "Any".to_string(),
+            parameters: Vec::new(),
+            return_type: "String".to_string(),
+            polymorphic: true,
+            min_params: min,
+            max_params: max,
+        },
+        argument_evaluation: Default::default(),
+        null_propagation: Default::default(),
+        empty_propagation: EmptyPropagation::NoPropagation,
+        deterministic: true,
+        category: FunctionCategory::Utility,
+        requires_terminology: false,
+        requires_model: false,
+    }
+}
+
+// --- SoF-divergent overrides: join / lowBoundary / highBoundary -----------
+//
+// These three functions are overridden so the in-memory path matches the
+// SQL-on-FHIR conformance suite, where the engine's stock behaviour differs:
+//   * join() — a zero-argument call defaults to the empty separator (and an
+//     empty input collection yields empty, not "").
+//   * low/highBoundary() — the spec's precision-boundary rules over decimals
+//     and partial date/dateTime/time strings.
 
 /// The FHIR primitive string representation of a JSON value.
 fn value_to_string(v: &Value) -> String {
@@ -900,50 +800,89 @@ fn value_to_string(v: &Value) -> String {
     }
 }
 
-fn as_f64(v: Value) -> Option<f64> {
-    match v {
-        Value::Number(n) => n.as_f64(),
-        Value::String(s) => s.parse().ok(),
-        _ => None,
-    }
-}
+struct JoinFn;
 
-fn number_value(f: f64) -> Value {
-    if f.fract() == 0.0 && f.abs() < i64::MAX as f64 {
-        Value::Number((f as i64).into())
-    } else {
-        serde_json::Number::from_f64(f)
-            .map(Value::Number)
-            .unwrap_or(Value::Null)
+#[async_trait]
+impl PureFunctionEvaluator for JoinFn {
+    async fn evaluate(
+        &self,
+        input: Collection,
+        args: Vec<Collection>,
+    ) -> octofhir_fhirpath::Result<octofhir_fhirpath::EvaluationResult> {
+        // join() over an empty collection yields the empty collection (i.e.
+        // null), not an empty string. (FHIR/sql-on-fhir.js fn_join)
+        if input.is_empty() {
+            return Ok(octofhir_fhirpath::EvaluationResult::from_values(Vec::new()));
+        }
+        let sep = match args.first().and_then(|c| c.first()) {
+            Some(v) => value_to_string(&v.to_json_value()),
+            None => String::new(),
+        };
+        let parts: Vec<String> = input
+            .iter()
+            .map(|v| value_to_string(&v.to_json_value()))
+            .collect();
+        Ok(octofhir_fhirpath::EvaluationResult::from_values(vec![
+            FhirPathValue::string(parts.join(&sep)),
+        ]))
     }
-}
 
-fn json_eq(a: &Value, b: &Value) -> bool {
-    match (a, b) {
-        (Value::Number(x), Value::Number(y)) => match (x.as_f64(), y.as_f64()) {
-            (Some(x), Some(y)) => x == y,
-            _ => x == y,
-        },
-        _ => a == b,
-    }
-}
-
-fn json_cmp(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
-    match (a, b) {
-        (Value::Number(x), Value::Number(y)) => x.as_f64()?.partial_cmp(&y.as_f64()?),
-        (Value::String(x), Value::String(y)) => Some(x.cmp(y)),
-        _ => None,
+    fn metadata(&self) -> &FunctionMetadata {
+        static META: std::sync::LazyLock<FunctionMetadata> =
+            std::sync::LazyLock::new(|| sof_fn_metadata("join", 0, Some(1)));
+        &META
     }
 }
 
 /// The FHIR temporal type a boundary operates on, inferred from a leading
-/// `ofType(T)`.
+/// `ofType(T)` on the base.
 #[derive(Debug, Clone, Copy)]
 enum BoundaryType {
     Date,
     DateTime,
     Time,
     Unknown,
+}
+
+/// If `path` is a `…lowBoundary()`/`…highBoundary()` call, return the base path
+/// string, the low flag, and the temporal hint from a leading `ofType(T)`.
+fn boundary_call(path: &str) -> Option<(String, bool, BoundaryType)> {
+    let ast = octofhir_fhirpath::parse_ast(path).ok()?;
+    let (object, method) = match &ast {
+        ExpressionNode::MethodCall(m)
+            if m.method == "lowBoundary" || m.method == "highBoundary" =>
+        {
+            (m.object.as_ref(), m.method.as_str())
+        }
+        _ => return None,
+    };
+    let low = method == "lowBoundary";
+    let hint = boundary_hint(object);
+    Some((unparse(object), low, hint))
+}
+
+/// Recover a FHIRPath source string for a navigation/`ofType` sub-expression,
+/// enough to re-evaluate the boundary's base through the engine.
+fn unparse(node: &ExpressionNode) -> String {
+    match node {
+        ExpressionNode::Identifier(n) => n.name.clone(),
+        ExpressionNode::PropertyAccess(p) => format!("{}.{}", unparse(&p.object), p.property),
+        ExpressionNode::MethodCall(m) => {
+            let args: Vec<String> = m.arguments.iter().map(unparse).collect();
+            format!("{}.{}({})", unparse(&m.object), m.method, args.join(", "))
+        }
+        ExpressionNode::FunctionCall(f) => {
+            let args: Vec<String> = f.arguments.iter().map(unparse).collect();
+            format!("{}({})", f.name, args.join(", "))
+        }
+        ExpressionNode::Parenthesized(e) => format!("({})", unparse(e)),
+        ExpressionNode::TypeInfo(t) => t.name.clone(),
+        ExpressionNode::Literal(l) => match &l.value {
+            octofhir_fhirpath::LiteralValue::String(s) => format!("'{s}'"),
+            other => other.to_string(),
+        },
+        _ => String::new(),
+    }
 }
 
 fn boundary_hint(object: &ExpressionNode) -> BoundaryType {
@@ -961,6 +900,7 @@ fn boundary_hint(object: &ExpressionNode) -> BoundaryType {
                 _ => BoundaryType::Unknown,
             }
         }
+        ExpressionNode::PropertyAccess(p) => boundary_hint(&p.object),
         ExpressionNode::Parenthesized(e) => boundary_hint(e),
         _ => BoundaryType::Unknown,
     }
@@ -985,6 +925,14 @@ fn boundary(v: &Value, low: bool, hint: BoundaryType) -> Value {
     }
 }
 
+fn number_value(f: f64) -> Value {
+    serde_json::Number::from_f64(f)
+        .map(Value::Number)
+        .unwrap_or(Value::Null)
+}
+
+/// Widen a partial date/dateTime/time string to its low/high precision bound,
+/// using the temporal `hint` where present (else inferred from the string).
 fn boundary_string(s: &str, low: bool, hint: BoundaryType) -> String {
     let is_time = matches!(hint, BoundaryType::Time)
         || (matches!(hint, BoundaryType::Unknown) && s.contains(':') && !s.contains('-'));
@@ -999,7 +947,8 @@ fn boundary_string(s: &str, low: bool, hint: BoundaryType) -> String {
             _ => s.to_string(),
         };
     }
-    if matches!(hint, BoundaryType::DateTime) {
+    let is_datetime = matches!(hint, BoundaryType::DateTime) || s.contains('T');
+    if is_datetime {
         let time = if low {
             "T00:00:00.000+14:00"
         } else {
@@ -1035,34 +984,4 @@ fn last_day_of_month(year_month: &str) -> String {
         _ => 30,
     };
     format!("{last:02}")
-}
-
-fn capitalize_first(s: &str) -> String {
-    let mut chars = s.chars();
-    match chars.next() {
-        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
-        None => String::new(),
-    }
-}
-
-fn column_type(col: &Column) -> ColumnType {
-    if col.collection.unwrap_or(false) {
-        return ColumnType::Json;
-    }
-    // An `ansi/type` tag explicitly overrides the inferred column type.
-    if let Some(ansi) = ansi_type_tag(col) {
-        return ColumnType::from_ansi_type(ansi);
-    }
-    col.col_type
-        .as_deref()
-        .map(ColumnType::from_fhir_type)
-        .unwrap_or(ColumnType::String)
-}
-
-/// The value of a column's `ansi/type` tag, if present.
-pub(crate) fn ansi_type_tag(col: &Column) -> Option<&str> {
-    col.tag
-        .iter()
-        .find(|t| t.name == "ansi/type")
-        .and_then(|t| t.value.as_deref())
 }

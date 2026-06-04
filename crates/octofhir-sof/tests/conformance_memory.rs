@@ -12,8 +12,8 @@ use std::path::PathBuf;
 use octofhir_sof::{ViewDefinition, execute};
 use serde_json::Value;
 
-#[test]
-fn sql_on_fhir_conformance_in_memory() {
+#[tokio::test(flavor = "multi_thread")]
+async fn sql_on_fhir_conformance_in_memory() {
     let Some(dir) = test_cases_dir() else {
         eprintln!("test-cases dir not found — skipping in-memory conformance suite");
         return;
@@ -32,7 +32,7 @@ fn sql_on_fhir_conformance_in_memory() {
 
     let mut outcomes = Vec::new();
     for file in &files {
-        run_file(file, &mut outcomes);
+        run_file(file, &mut outcomes).await;
     }
     report(&outcomes);
 
@@ -51,22 +51,33 @@ fn sql_on_fhir_conformance_in_memory() {
 /// Extra cases not in the official suite (e.g. contained-resource keying),
 /// kept in `tests/extra/` so the vendored `tests/spec/` suite stays a clean
 /// mirror of upstream.
-#[test]
-fn extra_cases_in_memory() {
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/extra");
-    if !dir.is_dir() {
+#[tokio::test(flavor = "multi_thread")]
+async fn extra_cases_in_memory() {
+    // `tests/extra` holds extras that round-trip through both the SQL and the
+    // in-memory paths; `tests/extra_memory` holds cases that only the in-memory
+    // path supports (full-FHIRPath functions the SQL subset cannot lower), so
+    // the SQL harnesses must not pick them up.
+    let mut files: Vec<PathBuf> = Vec::new();
+    for sub in ["tests/extra", "tests/extra_memory"] {
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(sub);
+        if !dir.is_dir() {
+            continue;
+        }
+        files.extend(
+            std::fs::read_dir(&dir)
+                .unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display()))
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|p| p.extension().is_some_and(|x| x == "json")),
+        );
+    }
+    if files.is_empty() {
         return;
     }
-    let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
-        .unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display()))
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.extension().is_some_and(|x| x == "json"))
-        .collect();
     files.sort();
 
     let mut outcomes = Vec::new();
     for file in &files {
-        run_file(file, &mut outcomes);
+        run_file(file, &mut outcomes).await;
     }
     report(&outcomes);
 
@@ -81,7 +92,7 @@ struct Outcome {
     detail: String,
 }
 
-fn run_file(path: &PathBuf, outcomes: &mut Vec<Outcome>) {
+async fn run_file(path: &PathBuf, outcomes: &mut Vec<Outcome>) {
     let file = path.file_name().unwrap().to_string_lossy().into_owned();
     let doc: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap())
         .unwrap_or_else(|e| panic!("parse {file}: {e}"));
@@ -100,11 +111,11 @@ fn run_file(path: &PathBuf, outcomes: &mut Vec<Outcome>) {
             .and_then(Value::as_str)
             .unwrap_or("<untitled>")
             .to_string();
-        outcomes.push(run_test(&file, title, test, &resources));
+        outcomes.push(run_test(&file, title, test, &resources).await);
     }
 }
 
-fn run_test(file: &str, title: String, test: &Value, resources: &[Value]) -> Outcome {
+async fn run_test(file: &str, title: String, test: &Value, resources: &[Value]) -> Outcome {
     let expect_error = test
         .get("expectError")
         .and_then(Value::as_bool)
@@ -121,7 +132,7 @@ fn run_test(file: &str, title: String, test: &Value, resources: &[Value]) -> Out
         Err(e) => return mk(expect_error, format!("parse error: {e}")),
     };
 
-    let result = match execute(&view, resources) {
+    let result = match execute(&view, resources).await {
         Ok(r) => r,
         Err(e) => return mk(expect_error, format!("execute error: {e}")),
     };
