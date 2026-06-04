@@ -4,3 +4,5 @@
 *.pdb
 .DS_Store
 .env
+# Generated conformance result file (produced by `just conformance-report`).
+/conformance-results.json

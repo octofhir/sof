@@ -43,6 +43,11 @@ install:
 conformance:
     cargo test -p octofhir-sof --test conformance_memory -- --nocapture
 
+# Emit our pass/fail result file in the sql-on-fhir.org registry format.
+conformance-report out="conformance-results.json":
+    SOF_RESULT_JSON="{{out}}" cargo test -p octofhir-sof --test conformance_memory -- --nocapture
+    @echo "Result JSON written to {{out}} — see CONFORMANCE.md to submit it."
+
 # Refresh the vendored official content tests from upstream (FHIR/sql-on-fhir.js).
 update-spec-tests:
     #!/usr/bin/env bash

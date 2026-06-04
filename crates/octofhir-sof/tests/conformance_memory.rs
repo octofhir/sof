@@ -36,6 +36,13 @@ fn sql_on_fhir_conformance_in_memory() {
     }
     report(&outcomes);
 
+    // Emit a result file in the format the official sql-on-fhir.org registry
+    // expects (see write_result_json) when SOF_RESULT_JSON points at a path.
+    if let Ok(path) = std::env::var("SOF_RESULT_JSON") {
+        write_result_json(&outcomes, &path);
+        eprintln!("wrote conformance result JSON to {path}");
+    }
+
     // The in-memory evaluator passes the full vendored v2.1.0-pre suite.
     let failed = outcomes.iter().filter(|o| !o.passed).count();
     assert_eq!(failed, 0, "{failed} in-memory conformance cases failed");
@@ -121,6 +128,35 @@ fn run_test(file: &str, title: String, test: &Value, resources: &[Value]) -> Out
     } else {
         mk(true, "no expectation".into())
     }
+}
+
+/// Serialize outcomes into the JSON shape the official sql-on-fhir.org test
+/// registry consumes. The report is an object keyed by test-file name, each
+/// holding a `tests` array of `{ name, result: { passed, reason? } }`. This
+/// matches the per-implementation `testResultsUrl` documents linked from
+/// `test_report/public/implementations.json` in FHIR/sql-on-fhir.js (e.g. the
+/// Medplum / Safhire reports). Submit our entry by hosting the produced file
+/// and adding a row to that `implementations.json` (see README).
+fn write_result_json(outcomes: &[Outcome], path: &str) {
+    use serde_json::{Map, Value, json};
+
+    let mut report: Map<String, Value> = Map::new();
+    for o in outcomes {
+        let mut result = json!({ "passed": o.passed });
+        if !o.passed && !o.detail.is_empty() {
+            result["reason"] = Value::String(o.detail.clone());
+        }
+        let entry = report
+            .entry(o.file.clone())
+            .or_insert_with(|| json!({ "tests": [] }));
+        entry["tests"]
+            .as_array_mut()
+            .expect("tests array")
+            .push(json!({ "name": o.title, "result": result }));
+    }
+
+    let text = serde_json::to_string_pretty(&Value::Object(report)).expect("serialize report");
+    std::fs::write(path, text).unwrap_or_else(|e| panic!("write {path}: {e}"));
 }
 
 fn test_cases_dir() -> Option<PathBuf> {
