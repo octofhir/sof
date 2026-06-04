@@ -46,7 +46,7 @@ mod view_definition;
 pub use column::{ColumnInfo, ColumnType};
 pub use eval::execute;
 pub use runner::{ViewResult, ViewRunner};
-pub use sql_generator::{GeneratedColumn, GeneratedSql, SqlGenerator};
+pub use sql_generator::{Dialect, GeneratedColumn, GeneratedSql, SqlGenerator, create_table};
 pub use view_definition::{Column, Constant, SelectColumn, ViewDefinition, WhereClause};
 
 use thiserror::Error;

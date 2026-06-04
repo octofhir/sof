@@ -30,10 +30,26 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Generate PostgreSQL from a ViewDefinition (offline, no database).
+    /// Generate PostgreSQL from a ViewDefinition (offline, no database). With
+    /// `--ddl`, emit a CREATE TABLE for the view's output columns instead.
     Generate {
         /// Path to the ViewDefinition JSON file.
         view: PathBuf,
+
+        /// Emit a CREATE TABLE statement for the output columns instead of the
+        /// SELECT query.
+        #[arg(long)]
+        ddl: bool,
+
+        /// DDL type dialect: ansi (spec default), postgres or duckdb. Only used
+        /// with `--ddl`.
+        #[arg(long, default_value = "ansi")]
+        dialect: String,
+
+        /// Table name for `--ddl` (defaults to the ViewDefinition name, or the
+        /// resource name suffixed with `_view`).
+        #[arg(long)]
+        table: Option<String>,
     },
 
     /// Execute a ViewDefinition and write the rows. Runs against FHIR files with
@@ -117,6 +133,14 @@ fn load_view(path: &PathBuf) -> Result<ViewDefinition> {
         .with_context(|| format!("reading ViewDefinition {}", path.display()))?;
     ViewDefinition::parse(&text)
         .with_context(|| format!("parsing ViewDefinition {}", path.display()))
+}
+
+/// The default DDL table name for a view: its `name`, else `<resource>_view`.
+fn default_table_name(view: &ViewDefinition) -> String {
+    view.name
+        .clone()
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| format!("{}_view", view.resource.to_lowercase()))
 }
 
 /// Load FHIR resources from a file or a directory of files. Supports NDJSON
@@ -325,12 +349,27 @@ async fn main() {
 
 async fn run(cli: Cli, color: bool) -> Result<()> {
     match cli.command {
-        Command::Generate { view } => {
+        Command::Generate {
+            view,
+            ddl,
+            dialect,
+            table,
+        } => {
             let view = load_view(&view)?;
             let generated = SqlGenerator::new()
                 .generate(&view)
                 .context("generating SQL")?;
-            println!("{}", generated.sql);
+            if ddl {
+                let dialect: octofhir_sof::Dialect =
+                    dialect.parse().map_err(|e: String| anyhow::anyhow!(e))?;
+                let table = table.unwrap_or_else(|| default_table_name(&view));
+                print!(
+                    "{}",
+                    octofhir_sof::create_table(&table, &generated.columns, dialect)
+                );
+            } else {
+                println!("{}", generated.sql);
+            }
         }
         Command::Run {
             view,

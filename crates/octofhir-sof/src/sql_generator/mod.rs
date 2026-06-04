@@ -16,7 +16,10 @@ use crate::view_definition::ViewDefinition;
 
 mod boundary;
 mod constants;
+mod ddl;
 mod lower;
+
+pub use ddl::{Dialect, create_table};
 
 use lower::Lower;
 // Re-exported for the in-memory evaluator (crate::eval), which shares the
