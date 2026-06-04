@@ -114,4 +114,8 @@ demo:
     {{sof}} run {{examples}}/patient_contacts.json --input {{examples}}/patients.ndjson --output csv
     @echo "\n# 6. Generate the equivalent PostgreSQL for the same view"
     {{sof}} generate {{examples}}/patient_demographics.json
+    @echo "\n# 7. Generate DuckDB SQL for the same view"
+    {{sof}} generate {{examples}}/patient_demographics.json --dialect duckdb
+    @echo "\n# 8. Shareable lint: flag FHIRPath outside the portable subset (offline)"
+    -{{sof}} lint {{examples}}/shareable_violations.json --shareable
     @echo ""

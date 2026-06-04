@@ -8,7 +8,7 @@
 
 use banshee_hir::{AnalysisOptions, BuiltinLintPack, SchemaProvider, analyze_query_with_options};
 use octofhir_fhirpath::{ExpressionNode, parse_ast};
-use octofhir_sof::{Column, SelectColumn, SqlGenerator, ViewDefinition};
+use octofhir_sof::{Column, SelectColumn, ViewDefinition};
 
 use crate::finding::{Finding, Severity};
 use crate::provider::{ElementKind, FhirSchemaProvider};
@@ -26,14 +26,17 @@ enum Step {
     Func(String),
 }
 
-/// Lint a ViewDefinition: structural validation, selector validation against
-/// the schema, plus generated-SQL analysis.
+/// Lint a ViewDefinition: structural validation plus selector validation
+/// against the schema.
+///
+/// Findings are reported at the spec level — against the ViewDefinition's
+/// FHIRPath selectors and structure — not against our generated SQL. The
+/// generated SQL is machine-produced and spec-correct, and its lateral-join
+/// aliases trip a general SQL analyzer with false positives, so [`lint_sql`]
+/// is kept available but is not part of the default lint flow.
 pub fn lint(view: &ViewDefinition, provider: &FhirSchemaProvider) -> Vec<Finding> {
     let mut findings = crate::structure::validate_structure(view);
     findings.extend(lint_view(view, provider));
-    if let Ok(generated) = SqlGenerator::new().generate(view) {
-        findings.extend(lint_sql(&generated.sql, provider));
-    }
     findings
 }
 
