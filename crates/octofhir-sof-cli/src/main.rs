@@ -89,6 +89,10 @@ enum Command {
         /// Emit findings as machine-readable JSON instead of a report.
         #[arg(long)]
         json: bool,
+
+        /// Emit findings as SARIF 2.1.0 (for CI code scanning).
+        #[arg(long, conflicts_with = "json")]
+        sarif: bool,
     },
 
     /// Run a SQL-on-FHIR test-case file (the official content-test format:
@@ -118,6 +122,10 @@ enum Command {
         /// Emit findings as machine-readable JSON instead of a report.
         #[arg(long)]
         json: bool,
+
+        /// Emit findings as SARIF 2.1.0 (for CI code scanning).
+        #[arg(long, conflicts_with = "json")]
+        sarif: bool,
     },
 }
 
@@ -418,20 +426,52 @@ fn canonical_json(v: &serde_json::Value) -> String {
 }
 
 /// Print findings (JSON or rustc-style) and report whether any are errors.
+/// Output format for validate/lint findings.
+#[derive(Clone, Copy, PartialEq)]
+enum ReportFormat {
+    Human,
+    Json,
+    Sarif,
+}
+
+impl ReportFormat {
+    fn from_flags(json: bool, sarif: bool) -> Self {
+        if sarif {
+            Self::Sarif
+        } else if json {
+            Self::Json
+        } else {
+            Self::Human
+        }
+    }
+}
+
+/// Report findings in the chosen format. Returns true if any finding is an
+/// error (so the caller can set a non-zero exit code). For machine formats
+/// (JSON/SARIF) an empty finding list still emits a valid empty report.
 fn report_findings(
     origin: &str,
     source: &str,
     findings: &[octofhir_sof_lint::Finding],
-    json: bool,
+    fmt: ReportFormat,
     color: bool,
+    ok_msg: &str,
 ) -> bool {
-    if json {
-        println!("{}", diagnostic::render_findings_json(findings));
-    } else {
-        print!(
-            "{}",
-            diagnostic::render_findings(origin, source, findings, color)
-        );
+    match fmt {
+        ReportFormat::Json => println!("{}", diagnostic::render_findings_json(findings)),
+        ReportFormat::Sarif => {
+            println!("{}", diagnostic::render_findings_sarif(origin, findings))
+        }
+        ReportFormat::Human => {
+            if findings.is_empty() {
+                println!("{}", diagnostic::ok(ok_msg, color));
+            } else {
+                print!(
+                    "{}",
+                    diagnostic::render_findings(origin, source, findings, color)
+                );
+            }
+        }
     }
     findings.iter().any(|f| f.severity == Severity::Error)
 }
@@ -530,17 +570,14 @@ async fn run(cli: Cli, color: bool) -> Result<()> {
                 sink.flush().ok();
             }
         }
-        Command::Validate { view, json } => {
+        Command::Validate { view, json, sarif } => {
             let origin = view.display().to_string();
             let (source, view) = read_view(&view)?;
             let findings = validate_structure(&view);
-            if findings.is_empty() && !json {
-                println!("{}", diagnostic::ok("valid", color));
-            } else {
-                let has_error = report_findings(&origin, &source, &findings, json, color);
-                if has_error {
-                    std::process::exit(1);
-                }
+            let fmt = ReportFormat::from_flags(json, sarif);
+            let has_error = report_findings(&origin, &source, &findings, fmt, color, "valid");
+            if has_error {
+                std::process::exit(1);
             }
         }
         Command::Test { manifest } => {
@@ -580,6 +617,7 @@ async fn run(cli: Cli, color: bool) -> Result<()> {
             package,
             version,
             json,
+            sarif,
         } => {
             let origin = view.display().to_string();
             let (source, view) = read_view(&view)?;
@@ -594,13 +632,10 @@ async fn run(cli: Cli, color: bool) -> Result<()> {
             }
 
             let findings = lint(&view, &provider);
-            if findings.is_empty() && !json {
-                println!("{}", diagnostic::ok("no findings", color));
-            } else {
-                let has_error = report_findings(&origin, &source, &findings, json, color);
-                if has_error {
-                    std::process::exit(1);
-                }
+            let fmt = ReportFormat::from_flags(json, sarif);
+            let has_error = report_findings(&origin, &source, &findings, fmt, color, "no findings");
+            if has_error {
+                std::process::exit(1);
             }
         }
     }

@@ -87,6 +87,71 @@ pub fn render_findings_json(findings: &[Finding]) -> String {
     serde_json::to_string_pretty(&serde_json::Value::Array(items)).unwrap_or_default()
 }
 
+/// Render findings as SARIF 2.1.0 for CI code-scanning ingestion. `origin` is
+/// the analysed file, used as the result artifact URI.
+pub fn render_findings_sarif(origin: &str, findings: &[Finding]) -> String {
+    use std::collections::BTreeMap;
+
+    // Unique rules (id -> helpUri) for tool.driver.rules.
+    let mut rules: BTreeMap<&str, Option<&str>> = BTreeMap::new();
+    for f in findings {
+        rules
+            .entry(f.code.as_str())
+            .or_insert(f.help_url.as_deref());
+    }
+    let rule_objs: Vec<serde_json::Value> = rules
+        .iter()
+        .map(|(id, help)| {
+            let mut r = serde_json::json!({ "id": id });
+            if let Some(uri) = help {
+                r["helpUri"] = serde_json::json!(uri);
+            }
+            r
+        })
+        .collect();
+
+    let results: Vec<serde_json::Value> = findings
+        .iter()
+        .map(|f| {
+            let level = match f.severity {
+                Severity::Error => "error",
+                Severity::Warning => "warning",
+            };
+            let mut result = serde_json::json!({
+                "ruleId": f.code,
+                "level": level,
+                "message": { "text": f.message },
+                "locations": [{
+                    "physicalLocation": {
+                        "artifactLocation": { "uri": origin }
+                    }
+                }],
+            });
+            if let Some(loc) = &f.location {
+                result["locations"][0]["logicalLocations"] = serde_json::json!([{ "name": loc }]);
+            }
+            result
+        })
+        .collect();
+
+    let sarif = serde_json::json!({
+        "version": "2.1.0",
+        "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+        "runs": [{
+            "tool": {
+                "driver": {
+                    "name": "octofhir-sof",
+                    "informationUri": "https://github.com/octofhir/sof",
+                    "version": env!("CARGO_PKG_VERSION"),
+                    "rules": rule_objs,
+                }
+            },
+            "results": results,
+        }],
+    });
+    serde_json::to_string_pretty(&sarif).unwrap_or_default()
+}
+
 /// A green status line (e.g. `valid`), plain when colour is off.
 pub fn ok(msg: &str, color: bool) -> String {
     paint(msg, "32", color)
