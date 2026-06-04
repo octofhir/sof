@@ -85,6 +85,11 @@ run view input:
 validate view:
     {{sof}} validate {{view}}
 
+# Check a ViewDefinition against the portable ShareableViewDefinition FHIRPath
+# subset (offline, no package needed).
+lint-shareable view:
+    {{sof}} lint {{view}} --shareable
+
 # Run a SQL-on-FHIR test-case file (or directory) in memory.
 test-cases manifest:
     {{sof}} test {{manifest}}

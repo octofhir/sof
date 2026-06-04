@@ -14,7 +14,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use octofhir_sof::output::get_writer;
 use octofhir_sof::{SqlGenerator, ViewDefinition, ViewResult, ViewRunner};
-use octofhir_sof_lint::{FhirSchemaProvider, Severity, lint, validate_structure};
+use octofhir_sof_lint::{FhirSchemaProvider, Severity, lint, lint_shareable, validate_structure};
 use sqlx_postgres::PgPool;
 
 #[derive(Parser)]
@@ -110,14 +110,25 @@ enum Command {
         /// Path to the ViewDefinition JSON file.
         view: PathBuf,
 
-        /// FHIR package name (e.g. hl7.fhir.r4.core).
+        /// FHIR package name (e.g. hl7.fhir.r4.core). Enables schema-driven
+        /// selector linting (FH01–FH10). Optional when `--shareable` is used.
         #[arg(long)]
-        package: String,
+        package: Option<String>,
 
         /// Package version. When given, the package is installed if missing;
         /// otherwise only an already-present package is used (offline).
         #[arg(long)]
         version: Option<String>,
+
+        /// Enforce the ShareableViewDefinition FHIRPath subset (FH11): flag any
+        /// function/operator/literal outside the portable required subset.
+        #[arg(long)]
+        shareable: bool,
+
+        /// Exempt an engine-registered custom FHIRPath function from the
+        /// `--shareable` allow-list. Repeatable.
+        #[arg(long = "allow-fn", value_name = "NAME")]
+        allow_fn: Vec<String>,
 
         /// Emit findings as machine-readable JSON instead of a report.
         #[arg(long)]
@@ -682,22 +693,36 @@ async fn run(cli: Cli, color: bool) -> Result<()> {
             view,
             package,
             version,
+            shareable,
+            allow_fn,
             json,
             sarif,
         } => {
-            let origin = view.display().to_string();
-            let (source, view) = read_view(&view)?;
-            let provider = FhirSchemaProvider::load(&package, version.as_deref())
-                .await
-                .with_context(|| format!("loading package {package}"))?;
-            if provider.is_empty() {
+            if package.is_none() && !shareable {
                 anyhow::bail!(
-                    "package `{package}` has no StructureDefinitions in the store; \
-                     pass --version to install it"
+                    "nothing to lint: pass --package <name> for schema-driven \
+                     linting and/or --shareable for the portable-subset check"
                 );
             }
+            let origin = view.display().to_string();
+            let (source, view) = read_view(&view)?;
 
-            let findings = lint(&view, &provider);
+            let mut findings = Vec::new();
+            if let Some(package) = &package {
+                let provider = FhirSchemaProvider::load(package, version.as_deref())
+                    .await
+                    .with_context(|| format!("loading package {package}"))?;
+                if provider.is_empty() {
+                    anyhow::bail!(
+                        "package `{package}` has no StructureDefinitions in the store; \
+                         pass --version to install it"
+                    );
+                }
+                findings.extend(lint(&view, &provider));
+            }
+            if shareable {
+                findings.extend(lint_shareable(&view, &allow_fn));
+            }
             let fmt = ReportFormat::from_flags(json, sarif);
             let has_error = report_findings(&origin, &source, &findings, fmt, color, "no findings");
             if has_error {
