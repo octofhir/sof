@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/octofhir/sof"
@@ -13,8 +13,8 @@ authors = ["OctoFHIR Team <funyloony@gmail.com>"]
 [workspace.dependencies]
 # Internal (version is required so dependent crates carry a real requirement
 # when published to crates.io; keep in sync with workspace.package.version)
-octofhir-sof = { path = "crates/octofhir-sof", version = "0.1.1" }
-octofhir-sof-lint = { path = "crates/octofhir-sof-lint", version = "0.1.1" }
+octofhir-sof = { path = "crates/octofhir-sof", version = "0.1.2" }
+octofhir-sof-lint = { path = "crates/octofhir-sof-lint", version = "0.1.2" }
 
 # Ecosystem (crates.io)
 octofhir-fhirpath = "0.4.46"
@@ -43,11 +43,11 @@ futures-util = "0.3"
 pin-project-lite = "0.2"
 
 # Database
-sqlx-core = { version = "0.8.6", default-features = false, features = [
+sqlx-core = { version = "0.9.0", default-features = false, features = [
     "_rt-tokio",
     "json",
 ] }
-sqlx-postgres = { version = "0.8.6", default-features = false, features = [
+sqlx-postgres = { version = "0.9.0", default-features = false, features = [
     "json",
 ] }
 

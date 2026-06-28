@@ -5,6 +5,7 @@
 
 use serde_json::Value;
 use sqlx_core::row::Row;
+use sqlx_core::sql_str::AssertSqlSafe;
 use sqlx_postgres::{PgPool, PgRow};
 
 use crate::column::{ColumnInfo, ColumnType};
@@ -42,7 +43,7 @@ impl ViewRunner {
 
         tracing::debug!(sql = %generated.sql, "Executing view");
 
-        let rows = sqlx_core::query::query(&generated.sql)
+        let rows = sqlx_core::query::query(AssertSqlSafe(generated.sql.clone()))
             .fetch_all(&self.pool)
             .await
             .map_err(Error::Sql)?;
@@ -77,6 +78,48 @@ impl ViewRunner {
     pub fn pool(&self) -> &PgPool {
         &self.pool
     }
+}
+
+/// Fetches rows for SoF-generated SQL through an external database layer.
+///
+/// Implement this to run the SQL produced by [`SqlGenerator`] with your own
+/// connection pool / driver instead of the bundled sqlx [`ViewRunner`] — for
+/// example to reuse a host application's instrumented Postgres pool. Each
+/// returned inner `Vec` is one result row, with values in the same order as the
+/// supplied `columns`; implementations should coerce each value according to
+/// the column's [`ColumnType`].
+#[async_trait::async_trait]
+pub trait SqlExecutor {
+    /// Execute `sql` and return its rows as JSON values in `columns` order.
+    async fn fetch(&self, sql: &str, columns: &[GeneratedColumn]) -> Result<Vec<Vec<Value>>>;
+}
+
+/// Execute a ViewDefinition by generating SQL and delegating row fetching to an
+/// external [`SqlExecutor`]. Produces the same [`ViewResult`] as
+/// [`ViewRunner::run`], so callers can swap the database layer without changing
+/// downstream handling.
+///
+/// # Errors
+///
+/// Returns an error if SQL generation fails or the executor fails to fetch rows.
+pub async fn run_with<E: SqlExecutor + ?Sized>(
+    executor: &E,
+    generator: &SqlGenerator,
+    view: &ViewDefinition,
+) -> Result<ViewResult> {
+    let generated = generator.generate(view)?;
+    let data = executor.fetch(&generated.sql, &generated.columns).await?;
+    let columns: Vec<ColumnInfo> = generated
+        .columns
+        .iter()
+        .map(|c| ColumnInfo::new(c.alias.clone(), c.col_type))
+        .collect();
+    let row_count = data.len();
+    Ok(ViewResult {
+        columns,
+        data,
+        row_count,
+    })
 }
 
 /// Extract values from a row based on column definitions.

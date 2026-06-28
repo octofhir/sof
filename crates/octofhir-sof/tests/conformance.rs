@@ -19,6 +19,7 @@ use octofhir_sof::{SqlGenerator, ViewDefinition};
 use serde_json::Value;
 use sqlx_core::connection::Connection;
 use sqlx_core::error::Error as SqlxError;
+use sqlx_core::sql_str::AssertSqlSafe;
 use sqlx_postgres::PgConnection;
 
 const SETUP_SQL: &str = r#"
@@ -199,7 +200,7 @@ async fn load_resources(conn: &mut PgConnection, resources: &[Value]) -> Result<
             let ddl = format!(
                 "CREATE TABLE conf.\"{table}\" (id text, resource jsonb, resource_type text, status text)"
             );
-            sqlx_core::raw_sql::raw_sql(&ddl)
+            sqlx_core::raw_sql::raw_sql(AssertSqlSafe(ddl))
                 .execute(&mut *conn)
                 .await?;
         }
@@ -208,9 +209,9 @@ async fn load_resources(conn: &mut PgConnection, resources: &[Value]) -> Result<
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string();
-        sqlx_core::query::query(&format!(
+        sqlx_core::query::query(AssertSqlSafe(format!(
             "INSERT INTO conf.\"{table}\" (id, resource, resource_type, status) VALUES ($1, $2, $3, 'created')"
-        ))
+        )))
         .bind(id)
         .bind(res)
         .bind(rt)
@@ -249,7 +250,7 @@ async fn run_test(conn: &mut PgConnection, file: &str, title: &str, test: &Value
     };
 
     let wrapped = format!("SELECT coalesce(jsonb_agg(t), '[]'::jsonb) FROM ({sql}) t");
-    let rows: Result<(Value,), SqlxError> = sqlx_core::query_as::query_as(&wrapped)
+    let rows: Result<(Value,), SqlxError> = sqlx_core::query_as::query_as(AssertSqlSafe(wrapped))
         .fetch_one(&mut *conn)
         .await;
 

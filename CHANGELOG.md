@@ -4,6 +4,20 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.1.2]
+
+### Added
+
+- **`SqlExecutor` trait and `run_with`** — execute a ViewDefinition by generating
+  SQL and delegating row fetching to an external database layer, instead of the
+  bundled sqlx `ViewRunner`. Host applications can reuse their own instrumented
+  Postgres pool while keeping SoF's SQL generation and `ViewResult` shape.
+
+### Changed
+
+- Bumped sqlx (`sqlx-core`, `sqlx-postgres`) to `0.9` for the Postgres
+  `ViewRunner` path.
+
 ## [0.1.1]
 
 ### Changed
