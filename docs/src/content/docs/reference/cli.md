@@ -5,7 +5,7 @@ description: Every octofhir-sof subcommand and flag.
 
 ```text
 octofhir-sof generate <view> [--ddl] [--dialect ansi|postgres|duckdb] [--table <name>]
-octofhir-sof run      <view> [--input <file|dir|->] [--db <url>] [--output csv|ndjson|json|parquet] [--out <path>]
+octofhir-sof run      <view> [--input <file|dir|->] [--db <url>] [--output csv|ndjson|json|parquet] [--out <path>] [--parquet-temporal text|native] [--threads <n>]
 octofhir-sof validate <view> [--json | --sarif]
 octofhir-sof lint     <view> [--package <name>] [--version <v>] [--shareable] [--allow-fn <name>]… [--json | --sarif]
 octofhir-sof test     <manifest>
@@ -47,8 +47,31 @@ ViewDefinitions runs every view in one pass, one output file per view into
 - `--db <url>` — PostgreSQL connection URL (or set `DATABASE_URL`).
 - `--output <fmt>` — `csv` (default), `ndjson`, `json` (`parquet` with the
   Parquet feature).
+- `--parquet-temporal <text|native>` — Parquet encoding; defaults to `text`
+  (original FHIR strings). `native` writes Date32, UTC microsecond timestamps,
+  and Time64 microseconds. Partial values floor to period start, date-only
+  timestamps use midnight UTC, offsets normalize to UTC, and timestamps without
+  offsets mean UTC. Submicrosecond precision is truncated. Invalid/non-string
+  values become null with a warning on stderr, without logging their contents.
+  Null input stays null without warning. Native output loses original precision
+  and offset; it does not add precision columns. Accepted but ignored for other
+  output formats.
+- `--threads <n>` — threads for parsing/evaluation; defaults to available CPUs.
+  Output row order is preserved.
 - `--out <path>` — write to this file instead of stdout (a directory when
   running a directory of views).
+
+Parquet output requires `cargo install octofhir-sof-cli --features parquet`
+(or a prebuilt release binary). A binary built without the feature reports an
+error for `--output parquet`; passing the temporal flag does not enable Parquet.
+
+```sh
+octofhir-sof run examples/temporal_view.json --input examples/temporal_resources.ndjson \
+  --output parquet --parquet-temporal native --out temporal.parquet
+```
+
+The encoding applies to files, stdin or PostgreSQL input, and to a single view
+or every view in a directory. CSV/JSON/NDJSON output is unchanged.
 
 NDJSON-in / NDJSON-out for a single view streams resource-by-resource in bounded
 memory.

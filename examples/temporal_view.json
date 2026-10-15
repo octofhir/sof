@@ -1,0 +1,37 @@
+{
+  "resourceType": "ViewDefinition",
+  "name": "patient_temporals",
+  "status": "active",
+  "resource": "Patient",
+  "select": [
+    {
+      "column": [
+        {
+          "name": "id",
+          "path": "id",
+          "type": "id"
+        },
+        {
+          "name": "birth_date",
+          "path": "birthDate",
+          "type": "date"
+        },
+        {
+          "name": "deceased_at",
+          "path": "deceasedDateTime",
+          "type": "dateTime"
+        },
+        {
+          "name": "last_updated",
+          "path": "meta.lastUpdated",
+          "type": "instant"
+        },
+        {
+          "name": "preferred_time",
+          "path": "extension.where(url = 'https://example.org/preferred-time').valueTime",
+          "type": "time"
+        }
+      ]
+    }
+  ]
+}

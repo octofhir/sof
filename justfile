@@ -30,8 +30,16 @@ fmt-check:
 clippy:
     cargo clippy --workspace --all-targets -- -D warnings
 
+# Run the library and CLI with every optional feature enabled.
+test-all-features:
+    cargo test --workspace --all-features --locked
+
+# Check a standalone consumer without workspace lint HTTP dependencies.
+check-library-deps:
+    bash scripts/check-library-deps.sh
+
 # The pre-commit gate: format, clippy and tests must all pass.
-check: fmt-check clippy test
+check: fmt-check clippy test test-all-features check-library-deps
 
 # Install the CLI into ~/.cargo/bin.
 install:

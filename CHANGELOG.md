@@ -4,6 +4,30 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.1.3]
+
+### Added
+
+- Opt-in native Parquet temporal types via
+  `ParquetWriter::with_temporal(TemporalEncoding::Native)` and
+  `run --output parquet --parquet-temporal native`: dates use Date32,
+  dateTime/instant use UTC microsecond timestamps, and time uses Time64
+  microseconds. Partial values floor to period start; invalid values become null
+  with redacted warnings. Text remains the default.
+- `ParquetWriter` configuration now includes `temporal`; prefer `new()` or
+  `default()` with the configuration builders over struct literals.
+
+### Changed
+
+- Updated Rust dependencies, including FHIRPath 0.4.56 and Arrow/Parquet 60,
+  and refreshed documentation dependencies to Astro 7 / Starlight 0.42.
+
+### Fixed
+
+- The core library no longer pulls in `reqwest` through FHIRPath/model
+  dependencies, including with the Parquet feature. Schema lint providers still
+  include HTTP support for FHIR packages.
+
 ## [0.1.2]
 
 ### Added
@@ -84,5 +108,7 @@ toolkit: a network-free library plus a thin CLI.
   in-memory and PostgreSQL paths, and on DuckDB through the `duckdb` CLI. See
   [CONFORMANCE.md](CONFORMANCE.md).
 
+[0.1.3]: https://github.com/octofhir/sof/releases/tag/v0.1.3
+[0.1.2]: https://github.com/octofhir/sof/releases/tag/v0.1.2
 [0.1.1]: https://github.com/octofhir/sof/releases/tag/v0.1.1
 [0.1.0]: https://github.com/octofhir/sof/releases/tag/v0.1.0

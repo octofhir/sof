@@ -11,8 +11,16 @@ env:
 
 jobs:
   check:
-    name: fmt + clippy + test
+    name: fmt + clippy + test (${{ matrix.mode }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - mode: default
+            features: ""
+          - mode: parquet
+            features: --all-features
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -22,22 +30,67 @@ jobs:
       - name: Format
         run: cargo fmt --all -- --check
       - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
-      - name: Test
-        run: cargo test --workspace
+        run: cargo clippy --workspace --all-targets --locked ${{ matrix.features }} -- -D warnings
+      - name: Test library and CLI
+        run: cargo test --workspace --locked ${{ matrix.features }}
 
-  parquet-feature:
-    name: test (parquet feature)
+  library-dependencies:
+    name: independent library without reqwest
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Test with parquet feature
-        run: cargo test -p octofhir-sof --features parquet
+      - run: bash scripts/check-library-deps.sh
+
+  postgres-conformance:
+    name: PostgreSQL conformance and native CLI
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: conformance
+        ports:
+          - 55433:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d conformance"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      SOF_CONFORMANCE_DB: postgres://postgres:postgres@localhost:55433/conformance
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: PostgreSQL content suite
+        run: cargo test -p octofhir-sof --test conformance --locked -- --nocapture
+      - name: Native Parquet from PostgreSQL CLI
+        run: cargo test -p octofhir-sof-cli --features parquet --test parquet_temporal_cli postgres_uses_the_same_native_writer --locked -- --nocapture
+
+  duckdb-conformance:
+    name: DuckDB conformance and native Parquet interoperability
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install DuckDB CLI
+        run: |
+          curl -fsSL https://github.com/duckdb/duckdb/releases/download/v1.5.6/duckdb_cli-linux-amd64.gz | gzip -d > "$RUNNER_TEMP/duckdb"
+          chmod +x "$RUNNER_TEMP/duckdb"
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+      - name: DuckDB content suite
+        run: cargo test -p octofhir-sof --test conformance_duckdb --locked -- --nocapture
+      - name: Read native temporal example without casts
+        run: |
+          cargo run -p octofhir-sof-cli --features parquet --locked -- run examples/temporal_view.json --input examples/temporal_resources.ndjson --output parquet --parquet-temporal native --out /tmp/sof-native.parquet
+          duckdb -bail -init /dev/null < scripts/check-temporal-duckdb.sql
 
   docs:
-    name: rustdoc
+    name: rustdoc (default + parquet)
     runs-on: ubuntu-latest
     env:
       RUSTDOCFLAGS: -D warnings
@@ -45,5 +98,24 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Build docs
-        run: cargo doc --workspace --no-deps
+      - run: cargo doc --workspace --no-deps --locked
+      - run: cargo doc --workspace --all-features --no-deps --locked
+
+  docs-site:
+    name: documentation site
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: docs
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: docs/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile --strict-peer-dependencies
+      - run: pnpm build

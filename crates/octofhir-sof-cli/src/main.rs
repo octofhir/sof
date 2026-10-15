@@ -12,7 +12,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use octofhir_sof::output::get_writer;
+use octofhir_sof::output::{OutputWriter, get_writer};
 use octofhir_sof::{SqlGenerator, ViewDefinition, ViewResult, ViewRunner};
 use octofhir_sof_lint::{FhirSchemaProvider, Severity, lint, lint_shareable, validate_structure};
 use sqlx_postgres::PgPool;
@@ -79,6 +79,13 @@ enum Command {
         /// Write to this file instead of stdout.
         #[arg(long)]
         out: Option<PathBuf>,
+
+        /// Parquet temporal encoding: text preserves the FHIR strings; native
+        /// writes Date32 / Timestamp(microseconds, UTC) / Time64(microseconds).
+        /// Partial dates floor to period start, missing offsets mean UTC, and
+        /// invalid values become null with a warning. Ignored for other formats.
+        #[arg(long, default_value = "text", value_parser = ["text", "native"])]
+        parquet_temporal: String,
 
         /// Threads for parsing --input and evaluating views on it (default:
         /// the number of CPUs). Rows keep the input order whatever the count.
@@ -230,6 +237,22 @@ fn output_extension(format: &str) -> &'static str {
         "parquet" => "parquet",
         _ => "csv",
     }
+}
+
+/// Apply Parquet-only options; other formats keep their existing writers.
+fn select_writer(format: &str, parquet_temporal: &str) -> Result<Box<dyn OutputWriter>> {
+    if format.eq_ignore_ascii_case("parquet") {
+        #[cfg(feature = "parquet")]
+        {
+            use octofhir_sof::output::{ParquetWriter, TemporalEncoding};
+            let temporal = TemporalEncoding::parse(parquet_temporal)?;
+            return Ok(Box::new(ParquetWriter::new().with_temporal(temporal)));
+        }
+        #[cfg(not(feature = "parquet"))]
+        anyhow::bail!("Parquet output requires a build with --features parquet");
+    }
+    let _ = parquet_temporal;
+    get_writer(format).context("selecting output format")
 }
 
 /// The default DDL table name for a view: its `name`, else `<resource>_view`.
@@ -581,6 +604,12 @@ fn report_findings(
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
+    #[cfg(feature = "parquet")]
+    let _ = tracing_subscriber::fmt()
+        .with_writer(io::stderr)
+        .with_ansi(false)
+        .with_max_level(tracing_subscriber::filter::LevelFilter::WARN)
+        .try_init();
     let color = diagnostic::use_color(cli.no_color);
     if let Err(e) = run(cli, color).await {
         eprintln!("{} {e:#}", diagnostic::error_prefix(color));
@@ -620,9 +649,11 @@ async fn run(cli: Cli, color: bool) -> Result<()> {
             output,
             out,
             threads,
+            parquet_temporal,
         } => {
             let threads = threads
                 .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()));
+            let writer = select_writer(&output, &parquet_temporal)?;
             // A directory of ViewDefinitions runs every view in one pass, writing
             // one output file per view into the --out directory.
             let multi = view.is_dir();
@@ -662,8 +693,6 @@ async fn run(cli: Cli, color: bool) -> Result<()> {
                     anyhow::bail!("provide --input <file|dir|-> to run on files, or --db <url>")
                 }
             };
-
-            let writer = get_writer(&output).context("selecting output format")?;
 
             if multi {
                 let out_dir =

@@ -1,0 +1,2 @@
+{"resourceType":"Patient","id":"synthetic-1","birthDate":"2000-02","deceasedDateTime":"2026-03","meta":{"lastUpdated":"2026-03-01T12:00:00.123456+02:00"},"extension":[{"url":"https://example.org/preferred-time","valueTime":"09:30:00"}]}
+{"resourceType":"Patient","id":"synthetic-2","birthDate":"1980","deceasedDateTime":"2026-03-02T08:00:00Z","meta":{"lastUpdated":"2026-03-02T08:00:00Z"},"extension":[{"url":"https://example.org/preferred-time","valueTime":"10:15:00.250"}]}

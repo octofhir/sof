@@ -10,7 +10,8 @@ database required, or by generating PostgreSQL.
   content-test suite (144/144):
   - a **database-free in-memory evaluator** over `serde_json`, and
   - a **PostgreSQL generator** that lowers FHIRPath to SQL over JSONB.
-- **Writers**: CSV, NDJSON, JSON, and Parquet (feature-gated).
+- **Writers**: CSV, NDJSON, JSON, and Parquet (feature-gated), with opt-in
+  native temporal types for analytics.
 - **Offline lint & validation** of ViewDefinitions (FH01–FH10) with rustc-style
   diagnostics, plus JSON and SARIF output for CI.
 - Full support for the v2.1 additions: the `repeat` directive and the
@@ -24,6 +25,8 @@ curl -fsSL https://raw.githubusercontent.com/octofhir/sof/main/install.sh | sh
 
 # From crates.io:
 cargo install octofhir-sof-cli
+# Include Parquet output (prebuilt binaries already include it):
+cargo install octofhir-sof-cli --features parquet
 
 # …or from a clone of this repo:
 cargo install --path crates/octofhir-sof-cli
@@ -47,6 +50,10 @@ cat export/*.ndjson | octofhir-sof run view.json --input - --output ndjson
 
 # Run every view in a directory in one pass, one output file per view
 octofhir-sof run views/ --input data/ --output csv --out out/
+
+# Write real dates/timestamps/times to Parquet (requires the parquet feature)
+octofhir-sof run examples/temporal_view.json --input examples/temporal_resources.ndjson \
+  --output parquet --parquet-temporal native --out temporal.parquet
 
 # Generate SQL for the view (PostgreSQL JSONB by default, or DuckDB JSON)
 octofhir-sof generate view.json
@@ -85,7 +92,7 @@ use octofhir_sof::{ViewDefinition, execute, SqlGenerator};
 let view = ViewDefinition::parse(&json_text)?;
 
 // In-memory:
-let result = execute(&view, &resources)?;
+let result = execute(&view, &resources).await?;
 
 // Or generate SQL:
 let sql = SqlGenerator::new().generate(&view)?.sql;
@@ -96,12 +103,42 @@ For bounded-memory streaming, compile once and run resource-at-a-time:
 ```rust
 use octofhir_sof::CompiledView;
 
-let compiled = CompiledView::compile(&view)?;
+let compiled = CompiledView::compile(&view).await?;
 for resource in resources {
-    for row in compiled.execute_resource(&resource)? {
+    for row in compiled.execute_resource(&resource).await? {
         // row is the column values in column order
     }
 }
+```
+
+### Parquet temporal encoding
+
+Parquet keeps temporal values as strings by default (`TemporalEncoding::Text`).
+With `--parquet-temporal native`, or the library builder below, `date` becomes
+Arrow `Date32`, `dateTime`/`instant` become `Timestamp(Microsecond, "UTC")`, and
+`time` becomes `Time64(Microsecond)`:
+
+```rust
+use octofhir_sof::output::{OutputWriter, ParquetWriter, TemporalEncoding};
+
+let writer = ParquetWriter::new().with_temporal(TemporalEncoding::Native);
+writer.write(&result, &mut std::fs::File::create("temporal.parquet")?)?;
+```
+
+Build with `--features parquet`. Reduced-precision values are set to the start
+of their period (`2026` → January 1, `2026-03` → March 1); date-only timestamps
+use midnight UTC. Offsets are normalized to UTC, missing offsets mean UTC,
+and finer-than-microsecond precision is truncated. Unparseable or non-string
+values become null with a warning that does not log their original contents.
+Native encoding loses the original precision and offset; Text preserves them.
+No extra precision columns are added. Collection columns remain JSON strings.
+The option is accepted but ignored for CSV, JSON and NDJSON.
+
+DuckDB reads the resulting temporal types without casts:
+
+```sh
+duckdb -c "DESCRIBE SELECT * FROM read_parquet('temporal.parquet');"
+duckdb -c "SELECT birth_date, date_part('year', birth_date) FROM read_parquet('temporal.parquet');"
 ```
 
 ## SQL dialects

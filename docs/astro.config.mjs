@@ -6,6 +6,7 @@ import starlight from '@astrojs/starlight';
 export default defineConfig({
   site: 'https://octofhir.github.io',
   base: '/sof',
+  compressHTML: true,
   integrations: [
     starlight({
       title: 'octofhir-sof',

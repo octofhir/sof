@@ -47,3 +47,15 @@ The binary is `target/release/octofhir-sof`. The library
 (`octofhir-sof`) is network-free; the lint crate (`octofhir-sof-lint`)
 resolves FHIR packages through the canonical manager only when you pass
 `lint --package`.
+
+## Library with Parquet
+
+```toml
+[dependencies]
+octofhir-sof = { version = "0.1.3", features = ["parquet"] }
+```
+
+The feature enables the Parquet writer and its temporal conversion support.
+Temporal columns remain strings unless you select `TemporalEncoding::Native`
+or `--parquet-temporal native`. Core dependencies do not pull in `reqwest`;
+the lint/CLI graph still includes HTTP clients for schema packages.
