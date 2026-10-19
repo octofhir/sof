@@ -4,6 +4,12 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.1.4]
+
+### Changed
+
+- Updated FHIRPath to 0.4.57 and canonical manager to 0.2.4.
+
 ## [0.1.3]
 
 ### Added
@@ -108,6 +114,7 @@ toolkit: a network-free library plus a thin CLI.
   in-memory and PostgreSQL paths, and on DuckDB through the `duckdb` CLI. See
   [CONFORMANCE.md](CONFORMANCE.md).
 
+[0.1.4]: https://github.com/octofhir/sof/releases/tag/v0.1.4
 [0.1.3]: https://github.com/octofhir/sof/releases/tag/v0.1.3
 [0.1.2]: https://github.com/octofhir/sof/releases/tag/v0.1.2
 [0.1.1]: https://github.com/octofhir/sof/releases/tag/v0.1.1

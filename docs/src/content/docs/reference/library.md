@@ -61,7 +61,7 @@ Enable the optional writer with:
 
 ```toml
 [dependencies]
-octofhir-sof = { version = "0.1.3", features = ["parquet"] }
+octofhir-sof = { version = "0.1.4", features = ["parquet"] }
 ```
 
 ```rust

@@ -52,7 +52,7 @@ resolves FHIR packages through the canonical manager only when you pass
 
 ```toml
 [dependencies]
-octofhir-sof = { version = "0.1.3", features = ["parquet"] }
+octofhir-sof = { version = "0.1.4", features = ["parquet"] }
 ```
 
 The feature enables the Parquet writer and its temporal conversion support.
