@@ -1,8 +1,17 @@
-# octofhir/sof
+<p align="center"><img src=".github/banner.png" alt="octo/sof — SQL on FHIR v2, with or without a database" width="100%"></p>
+
+<p align="center"><b>SQL on FHIR v2 for Rust: run ViewDefinitions in memory, or generate PostgreSQL and DuckDB SQL.</b></p>
+
+<p align="center">
+  <a href="https://github.com/octofhir/sof/actions/workflows/ci.yml"><img src="https://github.com/octofhir/sof/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://crates.io/crates/octofhir-sof"><img src="https://img.shields.io/crates/v/octofhir-sof.svg" alt="crates.io"></a>
+  <a href="https://docs.rs/octofhir-sof"><img src="https://docs.rs/octofhir-sof/badge.svg" alt="docs.rs"></a>
+  <a href="#license"><img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg" alt="License: MIT OR Apache-2.0"></a>
+</p>
 
 A Rust toolkit for [SQL on FHIR v2](https://build.fhir.org/ig/FHIR/sql-on-fhir-v2/):
 parse `ViewDefinition` resources and turn FHIR data into flat tables — with no
-database required, or by generating PostgreSQL.
+database required, or by generating SQL.
 
 **Documentation:** <https://octofhir.github.io/sof>
 
@@ -177,4 +186,11 @@ our entry to the implementation registry.
 
 ## License
 
-MIT OR Apache-2.0.
+Licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or <http://www.apache.org/licenses/LICENSE-2.0>)
+- MIT license ([LICENSE-MIT](LICENSE-MIT) or <http://opensource.org/licenses/MIT>)
+
+at your option.
+
+Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in this project by you, as defined in the Apache-2.0 license, shall be dual licensed as above, without any additional terms or conditions.
