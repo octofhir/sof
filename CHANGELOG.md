@@ -4,6 +4,14 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.1]
+
+### Security
+
+- Patched dependencies: zstd 0.14.3, zstd-safe 8.2, zstd-sys 2.1.2, rustls-webpki
+  0.103.16, webpki-roots / webpki-root-certs 1.0.11, ctutils 0.4.7 (`cargo audit`
+  is clean). The documentation site moves to Astro 7 / Starlight 0.42.
+
 ## [0.2.0]
 
 ### Added
