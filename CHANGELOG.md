@@ -4,6 +4,35 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.0]
+
+### Added
+
+- `CompileOptions` with a `TerminologyProvider` for the in-memory engine:
+  `memberOf()`, `subsumes()` and the other terminology functions run in views.
+  The CLI takes `--tx <url>` / `SOF_TX` (feature `tx-remote`).
+- `SqlGenerator::with_source(relation)`: a view reads a named relation (for
+  example an authorized CTE) instead of the resource table.
+- SQL lowering beyond the required subset: `upper`, `lower`, `length`, `trim`,
+  `startsWith`, `endsWith`, `contains`, `indexOf`, `substring`, `replace`, `iif`,
+  `select`, `all`, `skip`, `take`, `tail`, `distinct`, `abs` (integer),
+  `ceiling` / `floor` / `truncate` (typed), and `~` per FHIRPath string
+  equivalence. Each runs the same on the in-memory engine, PostgreSQL and DuckDB.
+
+### Changed
+
+- Database backends and outputs are opt-in features: `postgres` (`ViewRunner`),
+  `parquet`, `tx-remote`. The core library has no database driver (breaking:
+  enable `postgres` for `ViewRunner`).
+- Columns without a declared type keep their JSON type on every engine; rows
+  keep the view's column order in json and ndjson.
+- FHIRPath 0.5.1, UCUM 0.9.1, FHIRSchema 0.3.33.
+
+### Fixed
+
+- Text from a view (a `join()` separator, a string literal, an extension URL)
+  is always quoted as a SQL literal; a quote in it could end the literal.
+
 ## [0.1.4]
 
 ### Changed
