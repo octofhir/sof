@@ -1,0 +1,132 @@
+{
+  "title": "fhirpath_functions_beyond_the_required_subset",
+  "description": "FHIRPath functions outside the ViewDefinition required subset (https://hl7.org/fhir/uv/sql-on-fhir/StructureDefinition-ShareableViewDefinition.html), which a runner may support. Every engine of this runner (in-memory, PostgreSQL, DuckDB) must give the FHIRPath result (https://hl7.org/fhirpath/), so a view keeps its meaning whether it runs as SQL or in memory.",
+  "resources": [
+    {
+      "resourceType": "Patient",
+      "id": "p1",
+      "active": true,
+      "gender": "male",
+      "name": [{ "family": "Smith", "given": ["Peter", "James", "Peter"] }],
+      "telecom": [
+        { "system": "phone", "value": "555-1234" },
+        { "system": "email", "value": "peter@example.org" }
+      ],
+      "address": [{ "city": "  Boston " }],
+      "multipleBirthInteger": -3
+    },
+    {
+      "resourceType": "Patient",
+      "id": "p2",
+      "active": false,
+      "gender": "female",
+      "name": [{ "family": "O'Brien", "given": ["Ann"] }]
+    }
+  ],
+  "tests": [
+    {
+      "title": "string functions",
+      "view": {
+        "resource": "Patient",
+        "select": [
+          {
+            "column": [
+              { "name": "id", "path": "id", "type": "id" },
+              { "name": "upper", "path": "name.family.first().upper()", "type": "string" },
+              { "name": "lower", "path": "name.family.first().lower()", "type": "string" },
+              { "name": "len", "path": "name.family.first().length()", "type": "integer" },
+              { "name": "starts", "path": "name.family.first().startsWith('Sm')", "type": "boolean" },
+              { "name": "ends", "path": "name.family.first().endsWith('en')", "type": "boolean" },
+              { "name": "has", "path": "name.family.first().contains('Bri')", "type": "boolean" },
+              { "name": "idx", "path": "name.family.first().indexOf('i')", "type": "integer" },
+              { "name": "sub", "path": "name.family.first().substring(1, 3)", "type": "string" },
+              { "name": "tail_sub", "path": "name.family.first().substring(2)", "type": "string" },
+              { "name": "out_of_range", "path": "name.family.first().substring(20)", "type": "string" },
+              { "name": "replaced", "path": "name.family.first().replace('i', 'y')", "type": "string" }
+            ]
+          }
+        ]
+      },
+      "expect": [
+        {
+          "id": "p1", "upper": "SMITH", "lower": "smith", "len": 5, "starts": true,
+          "ends": false, "has": false, "idx": 2, "sub": "mit", "tail_sub": "ith",
+          "out_of_range": null, "replaced": "Smyth"
+        },
+        {
+          "id": "p2", "upper": "O'BRIEN", "lower": "o'brien", "len": 7, "starts": false,
+          "ends": true, "has": true, "idx": 4, "sub": "'Br", "tail_sub": "Brien",
+          "out_of_range": null, "replaced": "O'Bryen"
+        }
+      ]
+    },
+    {
+      "title": "trim and string equivalence",
+      "view": {
+        "resource": "Patient",
+        "select": [
+          {
+            "column": [
+              { "name": "id", "path": "id", "type": "id" },
+              { "name": "city", "path": "address.city.first().trim()", "type": "string" },
+              { "name": "male", "path": "gender ~ 'MALE'", "type": "boolean" },
+              { "name": "male_eq", "path": "gender = 'MALE'", "type": "boolean" }
+            ]
+          }
+        ]
+      },
+      "expect": [
+        { "id": "p1", "city": "Boston", "male": true, "male_eq": false },
+        { "id": "p2", "city": null, "male": false, "male_eq": false }
+      ]
+    },
+    {
+      "title": "iif and math",
+      "view": {
+        "resource": "Patient",
+        "select": [
+          {
+            "column": [
+              { "name": "id", "path": "id", "type": "id" },
+              { "name": "state", "path": "iif(active, 'active', 'inactive')", "type": "string" },
+              { "name": "births", "path": "multipleBirth.ofType(integer).abs()", "type": "integer" }
+            ]
+          }
+        ]
+      },
+      "expect": [
+        { "id": "p1", "state": "active", "births": 3 },
+        { "id": "p2", "state": "inactive", "births": null }
+      ]
+    },
+    {
+      "title": "collection functions",
+      "view": {
+        "resource": "Patient",
+        "select": [
+          {
+            "column": [
+              { "name": "id", "path": "id", "type": "id" },
+              { "name": "values", "path": "telecom.select(value).join(',')", "type": "string" },
+              { "name": "skip1", "path": "name.given.skip(1).join(',')", "type": "string" },
+              { "name": "take1", "path": "name.given.take(1).join(',')", "type": "string" },
+              { "name": "tail", "path": "name.given.tail().join(',')", "type": "string" },
+              { "name": "distinct", "path": "name.given.distinct().count()", "type": "integer" },
+              { "name": "all_valued", "path": "telecom.all(value.exists())", "type": "boolean" }
+            ]
+          }
+        ]
+      },
+      "expect": [
+        {
+          "id": "p1", "values": "555-1234,peter@example.org", "skip1": "James,Peter",
+          "take1": "Peter", "tail": "James,Peter", "distinct": 2, "all_valued": true
+        },
+        {
+          "id": "p2", "values": null, "skip1": null, "take1": "Ann", "tail": null,
+          "distinct": 1, "all_valued": true
+        }
+      ]
+    }
+  ]
+}

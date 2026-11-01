@@ -35,16 +35,51 @@ impl NdjsonWriter {
         self
     }
 
-    /// Convert a row to a JSON object.
-    fn row_to_object(columns: &[ColumnInfo], row: &[Value]) -> Value {
-        let mut obj = serde_json::Map::new();
-        for (col, value) in columns.iter().zip(row.iter()) {
-            if !value.is_null() {
-                obj.insert(col.name.clone(), value.clone());
+    /// A row as a JSON object in column order, without its null columns.
+    fn row_to_object<'a>(columns: &'a [ColumnInfo], row: &'a [Value]) -> OrderedRow<'a> {
+        OrderedRow {
+            columns,
+            values: row,
+            skip_nulls: true,
+        }
+    }
+}
+
+/// A row serialized as a JSON object whose keys follow the view's column
+/// order (a `serde_json::Map` would sort them).
+pub(crate) struct OrderedRow<'a> {
+    columns: &'a [ColumnInfo],
+    values: &'a [Value],
+    skip_nulls: bool,
+}
+
+impl serde::Serialize for OrderedRow<'_> {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(None)?;
+        for (column, value) in self.columns.iter().zip(self.values) {
+            if !(self.skip_nulls && value.is_null()) {
+                map.serialize_entry(&column.name, value)?;
             }
         }
-        Value::Object(obj)
+        map.end()
     }
+}
+
+/// Every row of `result` as an ordered JSON object, nulls included.
+fn ordered_rows(result: &ViewResult) -> Vec<OrderedRow<'_>> {
+    result
+        .data
+        .iter()
+        .map(|row| OrderedRow {
+            columns: &result.columns,
+            values: row,
+            skip_nulls: false,
+        })
+        .collect()
 }
 
 impl OutputWriter for NdjsonWriter {
@@ -185,7 +220,7 @@ impl OutputWriter for JsonArrayWriter {
     }
 
     fn write(&self, result: &ViewResult, output: &mut dyn Write) -> Result<()> {
-        let json_array = result.to_json_array();
+        let json_array = ordered_rows(result);
 
         let json_str = if self.pretty {
             serde_json::to_string_pretty(&json_array)
@@ -215,7 +250,7 @@ impl AsyncOutputWriter for JsonArrayWriter {
         result: &ViewResult,
         mut writer: W,
     ) -> Result<()> {
-        let json_array = result.to_json_array();
+        let json_array = ordered_rows(result);
 
         let json_str = if self.pretty {
             serde_json::to_string_pretty(&json_array)
@@ -256,7 +291,7 @@ impl AsyncOutputWriter for JsonArrayWriter {
             row_count: 0, // Not needed for output
         };
 
-        let json_array = result.to_json_array();
+        let json_array = ordered_rows(&result);
 
         let json_str = if self.pretty {
             serde_json::to_string_pretty(&json_array)
@@ -281,6 +316,28 @@ impl AsyncOutputWriter for JsonArrayWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rows_keep_the_view_column_order() {
+        use crate::column::ColumnType;
+        let result = ViewResult {
+            columns: vec![
+                ColumnInfo::new("z", ColumnType::String),
+                ColumnInfo::new("a", ColumnType::String),
+            ],
+            data: vec![vec![serde_json::json!("1"), serde_json::json!("2")]],
+            row_count: 1,
+        };
+        let mut ndjson = Vec::new();
+        OutputWriter::write(&NdjsonWriter::new(), &result, &mut ndjson).unwrap();
+        assert_eq!(
+            String::from_utf8(ndjson).unwrap().trim(),
+            r#"{"z":"1","a":"2"}"#
+        );
+        let mut json = Vec::new();
+        OutputWriter::write(&JsonArrayWriter::new(), &result, &mut json).unwrap();
+        assert_eq!(String::from_utf8(json).unwrap(), r#"[{"z":"1","a":"2"}]"#);
+    }
     use crate::column::ColumnType;
     use serde_json::json;
 

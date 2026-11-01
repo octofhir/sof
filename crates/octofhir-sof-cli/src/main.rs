@@ -12,9 +12,12 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+#[cfg(feature = "postgres")]
+use octofhir_sof::ViewRunner;
 use octofhir_sof::output::{OutputWriter, get_writer};
-use octofhir_sof::{SqlGenerator, ViewDefinition, ViewResult, ViewRunner};
+use octofhir_sof::{CompileOptions, SqlGenerator, ViewDefinition, ViewResult};
 use octofhir_sof_lint::{FhirSchemaProvider, Severity, lint, lint_shareable, validate_structure};
+#[cfg(feature = "postgres")]
 use sqlx_postgres::PgPool;
 
 #[derive(Parser)]
@@ -91,6 +94,12 @@ enum Command {
         /// the number of CPUs). Rows keep the input order whatever the count.
         #[arg(long)]
         threads: Option<usize>,
+
+        /// FHIR terminology server base URL that resolves memberOf(),
+        /// subsumes() and translate() in view paths when running on --input
+        /// (needs the tx-remote feature).
+        #[arg(long, env = "SOF_TX")]
+        tx: Option<String>,
     },
 
     /// Validate a ViewDefinition's structure against the spec, offline (no FHIR
@@ -174,18 +183,53 @@ fn load_view(path: &PathBuf) -> Result<ViewDefinition> {
 /// A resolved data source for `run`, shared across one or many views.
 enum Source {
     Files(Vec<serde_json::Value>),
+    #[cfg(feature = "postgres")]
     Db(PgPool),
 }
 
+/// In-memory compile options for `run`: a terminology provider when `--tx` is
+/// given. Remote answers are cached for the run, since a view tests the same
+/// codes against the same value sets resource after resource.
+fn compile_options(tx: Option<&str>) -> Result<CompileOptions> {
+    let Some(url) = tx else {
+        return Ok(CompileOptions::default());
+    };
+    #[cfg(feature = "tx-remote")]
+    {
+        use octofhir_sof::terminology::{
+            CachedTerminologyProvider, HttpTerminologyProvider, TerminologyCacheConfig,
+        };
+        let remote = HttpTerminologyProvider::new(url.to_string())
+            .map_err(|e| anyhow::anyhow!("terminology server {url}: {e}"))?;
+        let cached = CachedTerminologyProvider::new(remote, TerminologyCacheConfig::default());
+        Ok(CompileOptions::with_terminology(std::sync::Arc::new(
+            cached,
+        )))
+    }
+    #[cfg(not(feature = "tx-remote"))]
+    {
+        anyhow::bail!(
+            "--tx {url} needs a build with the tx-remote feature \
+             (cargo install octofhir-sof-cli --features tx-remote)"
+        )
+    }
+}
+
 /// Execute a single view against the resolved source.
-async fn run_view(source: &Source, view: &ViewDefinition, threads: usize) -> Result<ViewResult> {
+async fn run_view(
+    source: &Source,
+    view: &ViewDefinition,
+    threads: usize,
+    options: &CompileOptions,
+) -> Result<ViewResult> {
     match source {
         // Evaluation runs on threads of its own; block_in_place lets this
         // runtime worker wait for them without stalling other tasks.
-        Source::Files(resources) => {
-            tokio::task::block_in_place(|| octofhir_sof::execute_parallel(view, resources, threads))
-                .context("executing view")
-        }
+        Source::Files(resources) => tokio::task::block_in_place(|| {
+            octofhir_sof::execute_parallel_with(view, resources, threads, options)
+        })
+        .context("executing view"),
+        #[cfg(feature = "postgres")]
         Source::Db(pool) => ViewRunner::new(pool.clone())
             .run(view)
             .await
@@ -355,10 +399,11 @@ async fn stream_ndjson(
     view: &ViewDefinition,
     input: &PathBuf,
     sink: &mut dyn Write,
+    options: &CompileOptions,
 ) -> Result<usize> {
     use std::io::BufRead;
 
-    let compiled = octofhir_sof::CompiledView::compile(view)
+    let compiled = octofhir_sof::CompiledView::compile_with(view, options)
         .await
         .context("compiling view")?;
     let reader: Box<dyn BufRead> = if input.as_os_str() == "-" {
@@ -650,7 +695,15 @@ async fn run(cli: Cli, color: bool) -> Result<()> {
             out,
             threads,
             parquet_temporal,
+            tx,
         } => {
+            if tx.is_some() && input.is_none() {
+                anyhow::bail!(
+                    "--tx applies to --input: SQL run on a database does not evaluate \
+                     terminology functions"
+                );
+            }
+            let options = compile_options(tx.as_deref())?;
             let threads = threads
                 .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()));
             let writer = select_writer(&output, &parquet_temporal)?;
@@ -673,7 +726,7 @@ async fn run(cli: Cli, color: bool) -> Result<()> {
                     ),
                     None => Box::new(io::stdout().lock()),
                 };
-                let n = stream_ndjson(&view, &path, &mut sink).await?;
+                let n = stream_ndjson(&view, &path, &mut sink, &options).await?;
                 sink.flush().ok();
                 eprintln!("{n} rows");
                 return Ok(());
@@ -684,10 +737,15 @@ async fn run(cli: Cli, color: bool) -> Result<()> {
             // Acquire the data source once, shared across all views.
             let source = match (input, db) {
                 (Some(path), _) => Source::Files(load_resources(&path, threads)?),
+                #[cfg(feature = "postgres")]
                 (None, Some(db)) => Source::Db(
                     PgPool::connect(&db)
                         .await
                         .with_context(|| format!("connecting to {db}"))?,
+                ),
+                #[cfg(not(feature = "postgres"))]
+                (None, Some(_)) => anyhow::bail!(
+                    "--db needs a build with the postgres feature (it is on by default)"
                 ),
                 (None, None) => {
                     anyhow::bail!("provide --input <file|dir|-> to run on files, or --db <url>")
@@ -701,7 +759,7 @@ async fn run(cli: Cli, color: bool) -> Result<()> {
                     .with_context(|| format!("creating output directory {}", out_dir.display()))?;
                 let ext = output_extension(&output);
                 for (name, view) in &views {
-                    let result = run_view(&source, view, threads).await?;
+                    let result = run_view(&source, view, threads, &options).await?;
                     let path = out_dir.join(format!("{name}.{ext}"));
                     let mut sink: Box<dyn Write> = Box::new(
                         fs::File::create(&path)
@@ -715,7 +773,7 @@ async fn run(cli: Cli, color: bool) -> Result<()> {
                 }
             } else {
                 let (_, view) = &views[0];
-                let result = run_view(&source, view, threads).await?;
+                let result = run_view(&source, view, threads, &options).await?;
                 let mut sink: Box<dyn Write> = match out {
                     Some(path) => Box::new(
                         fs::File::create(&path)

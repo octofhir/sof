@@ -102,18 +102,21 @@ mod tests {
                 expression: String::new(),
                 alias: "id".into(),
                 col_type: ColumnType::String,
+                json_scalar: false,
             },
             GeneratedColumn {
                 name: "age".into(),
                 expression: String::new(),
                 alias: "age".into(),
                 col_type: ColumnType::Integer,
+                json_scalar: false,
             },
             GeneratedColumn {
                 name: "born".into(),
                 expression: String::new(),
                 alias: "born".into(),
                 col_type: ColumnType::Date,
+                json_scalar: false,
             },
         ]
     }

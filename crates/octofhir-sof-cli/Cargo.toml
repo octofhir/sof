@@ -25,12 +25,16 @@ anyhow = { workspace = true }
 annotate-snippets = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
-sqlx-postgres = { workspace = true }
+sqlx-postgres = { workspace = true, optional = true }
 tracing-subscriber = { workspace = true, optional = true }
 
 [features]
-default = []
+# `run --db` stays available in a default install.
+default = ["postgres"]
+postgres = ["octofhir-sof/postgres", "dep:sqlx-postgres"]
 parquet = ["octofhir-sof/parquet", "dep:tracing-subscriber"]
+# `run --tx <url>`: resolve memberOf/subsumes/translate against a terminology server.
+tx-remote = ["octofhir-sof/tx-remote"]
 
 [dev-dependencies]
 arrow = { workspace = true }

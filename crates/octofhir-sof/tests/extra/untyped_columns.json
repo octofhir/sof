@@ -1,0 +1,40 @@
+{
+  "title": "untyped_columns",
+  "description": "A non-collection column with no declared type keeps the FHIR JSON representation of its primitive: a boolean stays a boolean, an integer a number, a string a string. Column type inference is optional and treating undeclared types as strings is allowed (https://build.fhir.org/ig/FHIR/sql-on-fhir-v2/StructureDefinition-ViewDefinition.html#column-types), but every engine of this runner (in-memory, PostgreSQL, DuckDB) must return the same values for the same view.",
+  "resources": [
+    {
+      "resourceType": "Patient",
+      "id": "p1",
+      "active": true,
+      "gender": "female",
+      "multipleBirthInteger": 2
+    },
+    {
+      "resourceType": "Patient",
+      "id": "p2",
+      "active": false
+    }
+  ],
+  "tests": [
+    {
+      "title": "undeclared primitive columns keep their JSON types",
+      "view": {
+        "resource": "Patient",
+        "select": [
+          {
+            "column": [
+              { "name": "id", "path": "id" },
+              { "name": "active", "path": "active" },
+              { "name": "gender", "path": "gender" },
+              { "name": "births", "path": "multipleBirth.ofType(integer)" }
+            ]
+          }
+        ]
+      },
+      "expect": [
+        { "id": "p1", "active": true, "gender": "female", "births": 2 },
+        { "id": "p2", "active": false, "gender": null, "births": null }
+      ]
+    }
+  ]
+}

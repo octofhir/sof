@@ -251,24 +251,26 @@ impl Lower {
         let coll = self.coll(&ast, ctx)?;
         let collection = col.collection.unwrap_or(false);
         // An `ansi/type` tag explicitly overrides the inferred column type.
-        let ty = if let Some(ansi) = crate::eval::ansi_type_tag(col) {
-            ColumnType::from_ansi_type(ansi)
-        } else {
-            col.col_type
-                .as_deref()
-                .map(ColumnType::from_fhir_type)
-                .unwrap_or(ColumnType::String)
-        };
+        let declared = crate::eval::ansi_type_tag(col)
+            .map(ColumnType::from_ansi_type)
+            .or_else(|| col.col_type.as_deref().map(ColumnType::from_fhir_type));
 
-        let (expr, col_type) = if collection {
-            (coll, ColumnType::Json)
-        } else {
-            (self.scalar_col(&coll, ty), ty)
+        let (expr, col_type, json_scalar) = match (collection, declared) {
+            (true, _) => (coll, ColumnType::Json, false),
+            (false, Some(ty)) => (self.scalar_col(&coll, ty), ty, false),
+            // No declared type: the element as its FHIR JSON scalar, the same
+            // value the in-memory evaluator yields.
+            (false, None) => (
+                self.scalar_col(&coll, ColumnType::Json),
+                ColumnType::String,
+                true,
+            ),
         };
         Ok(PlanColumn {
             name: col.name.clone(),
             expr,
             col_type,
+            json_scalar,
         })
     }
 
@@ -462,6 +464,17 @@ impl Lower {
                     .dialect
                     .to_json_scalar(&format!("NOT ({})", self.bool(object, ctx)?)),
             )),
+            // Math on a value of a statically known numeric type: the input's
+            // type is not known otherwise (abs() of a Quantity is a Quantity).
+            "abs" | "ceiling" | "floor" | "truncate" => match self.numeric_type(object) {
+                Some(numeric) => {
+                    let oc = self.coll(object, ctx)?;
+                    self.math_fn(name, numeric, &oc)
+                }
+                None => Err(Error::InvalidPath(format!(
+                    "{name}() on a value of unknown type is evaluated in memory"
+                ))),
+            },
             "lowBoundary" | "highBoundary" => {
                 let hint = boundary_hint(object);
                 let oc = self.coll(object, ctx)?;
@@ -522,10 +535,250 @@ impl Lower {
             "lowBoundary" => Ok(self.boundary(coll, true, BoundaryType::Unknown)),
             "highBoundary" => Ok(self.boundary(coll, false, BoundaryType::Unknown)),
             "toString" => Ok(coll.to_string()),
+            // String manipulation (FHIRPath §1.5.6/§1.5.7). The input is one
+            // string; empty in, empty out.
+            "upper" => Ok(self.string_fn(coll, |t| format!("upper({t})"))),
+            "lower" => Ok(self.string_fn(coll, |t| format!("lower({t})"))),
+            "length" => Ok(self.string_fn(coll, |t| format!("length({t})"))),
+            "trim" => Ok(self.string_fn(coll, |t| {
+                format!("regexp_replace({t}, {}, '', 'g')", sql_string(r"^\s+|\s+$"))
+            })),
+            "startsWith" => {
+                let prefix = sql_string(&self.string_arg(name, args, 0)?);
+                Ok(self.string_fn(coll, |t| format!("starts_with({t}, {prefix})")))
+            }
+            "endsWith" => {
+                let suffix = sql_string(&self.string_arg(name, args, 0)?);
+                Ok(self.string_fn(coll, |t| {
+                    format!("(length({suffix}) = 0 OR right({t}, length({suffix})) = {suffix})")
+                }))
+            }
+            "contains" => {
+                let part = sql_string(&self.string_arg(name, args, 0)?);
+                Ok(self.string_fn(coll, |t| format!("(strpos({t}, {part}) > 0)")))
+            }
+            "indexOf" => {
+                let part = sql_string(&self.string_arg(name, args, 0)?);
+                Ok(self.string_fn(coll, |t| format!("(strpos({t}, {part}) - 1)")))
+            }
+            "substring" => self.substring_fn(coll, args),
+            "replace" => {
+                let pattern = self.string_arg(name, args, 0)?;
+                // An empty pattern inserts the substitution around every
+                // character, which SQL replace() does not: in-memory only.
+                if pattern.is_empty() {
+                    return Err(Error::InvalidPath(
+                        "replace() with an empty pattern is evaluated in memory".into(),
+                    ));
+                }
+                let pattern = sql_string(&pattern);
+                let with = sql_string(&self.string_arg(name, args, 1)?);
+                Ok(self.string_fn(coll, |t| format!("replace({t}, {pattern}, {with})")))
+            }
+            "iif" => self.iif_fn(coll, args),
+            "select" => self.select_fn(coll, args),
+            "all" => {
+                let cond = args
+                    .first()
+                    .ok_or_else(|| Error::InvalidPath("all() requires an argument".into()))?;
+                self.all_fn(coll, cond)
+            }
+            "skip" => {
+                let n = self.int_arg(name, args)?;
+                Ok(self.ordinal_slice(coll, &format!("ord > {n}")))
+            }
+            "take" => {
+                let n = self.int_arg(name, args)?;
+                Ok(self.ordinal_slice(coll, &format!("ord <= {n}")))
+            }
+            "tail" => Ok(self.ordinal_slice(coll, "ord > 1")),
+            "distinct" => Ok(self.distinct_fn(coll)),
             other => Err(Error::InvalidPath(format!(
                 "unsupported function {other}()"
             ))),
         }
+    }
+
+    /// `integer` or `decimal` when `node` is `….ofType(integer|decimal)`.
+    fn numeric_type(&self, node: &ExpressionNode) -> Option<&'static str> {
+        match node {
+            ExpressionNode::MethodCall(m) if m.method == "ofType" => {
+                match m
+                    .arguments
+                    .first()
+                    .and_then(|t| self.type_name(t).ok())?
+                    .as_str()
+                {
+                    "integer" | "Integer" => Some("integer"),
+                    "decimal" | "Decimal" => Some("decimal"),
+                    _ => None,
+                }
+            }
+            ExpressionNode::Parenthesized(e) => self.numeric_type(e),
+            _ => None,
+        }
+    }
+
+    /// `abs()`, `ceiling()`, `floor()`, `truncate()` (FHIRPath §1.5.8) of the
+    /// single number in `coll`. The last three return an Integer; `abs()` of
+    /// a decimal keeps its scale, which only the in-memory engine renders as
+    /// written, so it is lowered for integers only.
+    fn math_fn(&self, name: &str, numeric: &str, coll: &str) -> Result<String, Error> {
+        let int = self.dialect.int_cast();
+        let num = self.dialect.num_cast();
+        match (name, numeric) {
+            ("abs", "integer") => Ok(self.string_fn(coll, |t| format!("abs(({t})::{int})"))),
+            ("abs", _) => Err(Error::InvalidPath(
+                "abs() of a decimal is evaluated in memory".into(),
+            )),
+            ("ceiling", _) => Ok(self.string_fn(coll, |t| format!("(ceil(({t})::{num}))::{int}"))),
+            ("floor", _) => Ok(self.string_fn(coll, |t| format!("(floor(({t})::{num}))::{int}"))),
+            _ => Ok(self.string_fn(coll, |t| format!("(trunc(({t})::{num}))::{int}"))),
+        }
+    }
+
+    /// The single item of `coll` as a JSON value: NULL when `coll` is empty;
+    /// more than one item is an error (the FHIRPath singleton rule), raised
+    /// by the database as a subquery returning several rows.
+    fn single(&self, coll: &str) -> String {
+        let n = self.fresh();
+        let src = self.dialect.elements_table(coll, &format!("_sg{n}"), "_e");
+        format!("(SELECT _sg{n}._e FROM {src})")
+    }
+
+    /// `f` applied to the single string item of `coll`, as a one-item
+    /// collection; an empty input, or a NULL result, is the empty collection.
+    fn string_fn(&self, coll: &str, f: impl Fn(&str) -> String) -> String {
+        let n = self.fresh();
+        let text = self.dialect.scalar_text(&self.single(coll));
+        format!(
+            "(SELECT CASE WHEN _r IS NULL THEN {empty} ELSE {one} END FROM (SELECT {value} AS _r) AS _sf{n})",
+            empty = self.dialect.empty_array(),
+            one = self
+                .dialect
+                .build_array1(&self.dialect.to_json_scalar("_r")),
+            value = f(&text),
+        )
+    }
+
+    /// `substring(start [, length])`: 0-based; a start outside the string is
+    /// empty, a missing or overlong length runs to the end (FHIRPath §1.5.6.3).
+    fn substring_fn(&self, coll: &str, args: &[ExpressionNode]) -> Result<String, Error> {
+        let start = args
+            .first()
+            .ok_or_else(|| Error::InvalidPath("substring() requires a start".into()))
+            .and_then(|arg| self.int_literal(arg))?;
+        let length = args.get(1).map(|arg| self.int_literal(arg)).transpose()?;
+        Ok(self.string_fn(coll, |t| match length {
+            Some(len) if len < 0 => "NULL".to_string(),
+            Some(len) => format!(
+                "CASE WHEN {start} < 0 OR {start} >= length({t}) THEN NULL \
+                 ELSE substr({t}, {s}, {len}) END",
+                s = start + 1
+            ),
+            None => format!(
+                "CASE WHEN {start} < 0 OR {start} >= length({t}) THEN NULL \
+                 ELSE substr({t}, {s}) END",
+                s = start + 1
+            ),
+        }))
+    }
+
+    /// `iif(criterion, true-result [, otherwise-result])`, evaluated against
+    /// the single input item: an empty or false criterion picks the
+    /// otherwise-result, or the empty collection.
+    fn iif_fn(&self, coll: &str, args: &[ExpressionNode]) -> Result<String, Error> {
+        let (Some(criterion), Some(then)) = (args.first(), args.get(1)) else {
+            return Err(Error::InvalidPath(
+                "iif() requires a criterion and a true-result".into(),
+            ));
+        };
+        let item = self.single(coll);
+        let otherwise = match args.get(2) {
+            Some(otherwise) => self.coll(otherwise, &item)?,
+            None => self.dialect.empty_array().to_string(),
+        };
+        Ok(format!(
+            "(CASE WHEN {} THEN {} ELSE {otherwise} END)",
+            self.bool(criterion, &item)?,
+            self.coll(then, &item)?,
+        ))
+    }
+
+    /// `select(projection)`: the projection of every item, flattened in order.
+    fn select_fn(&self, coll: &str, args: &[ExpressionNode]) -> Result<String, Error> {
+        let projection = args
+            .first()
+            .ok_or_else(|| Error::InvalidPath("select() requires a projection".into()))?;
+        let n = self.fresh();
+        let item = format!("_sl{n}.value");
+        let projected = self.coll(projection, &item)?;
+        let items = self.dialect.elements_ord_table(coll, &format!("_sl{n}"));
+        let parts = self
+            .dialect
+            .elements_ord_table(&projected, &format!("_sp{n}"));
+        Ok(format!(
+            "(SELECT {} FROM {items} CROSS JOIN LATERAL {parts})",
+            self.dialect
+                .agg_ordered(&format!("_sp{n}.value"), &format!("_sl{n}.ord, _sp{n}.ord")),
+        ))
+    }
+
+    /// `all(criteria)`: true when the criteria is true for every item, so
+    /// true for an empty input (FHIRPath §1.5.1.3).
+    fn all_fn(&self, coll: &str, cond: &ExpressionNode) -> Result<String, Error> {
+        let n = self.fresh();
+        let item = format!("_al{n}._it");
+        let pred = self.bool(cond, &item)?;
+        let src = self.dialect.elements_table(coll, &format!("_al{n}"), "_it");
+        Ok(self
+            .dialect
+            .build_array1(&self.dialect.to_json_scalar(&format!(
+                "NOT EXISTS (SELECT 1 FROM {src} WHERE ({pred}) IS NOT TRUE)"
+            ))))
+    }
+
+    /// The items whose 1-based position satisfies `keep`, in order.
+    fn ordinal_slice(&self, coll: &str, keep: &str) -> String {
+        let n = self.fresh();
+        let src = self.dialect.elements_ord_table(coll, &format!("_os{n}"));
+        format!(
+            "(SELECT {} FROM {src} WHERE {keep})",
+            self.dialect.agg_ordered("value", "ord")
+        )
+    }
+
+    /// `distinct()`: each value once, at its first position.
+    fn distinct_fn(&self, coll: &str) -> String {
+        let n = self.fresh();
+        let src = self.dialect.elements_ord_table(coll, &format!("_ds{n}"));
+        format!(
+            "(SELECT {} FROM (SELECT value, min(ord) AS first FROM {src} GROUP BY value) AS _dd{n})",
+            self.dialect.agg_ordered("value", "first")
+        )
+    }
+
+    /// The string literal argument `index` of `name`.
+    fn string_arg(
+        &self,
+        name: &str,
+        args: &[ExpressionNode],
+        index: usize,
+    ) -> Result<String, Error> {
+        match args.get(index) {
+            Some(arg @ ExpressionNode::Literal(_)) => self.string_text(Some(arg)),
+            Some(_) => Err(Error::InvalidPath(format!(
+                "{name}() with a computed argument is evaluated in memory"
+            ))),
+            None => Err(Error::InvalidPath(format!("{name}() requires an argument"))),
+        }
+    }
+
+    /// The integer literal argument of `name`.
+    fn int_arg(&self, name: &str, args: &[ExpressionNode]) -> Result<i64, Error> {
+        args.first()
+            .ok_or_else(|| Error::InvalidPath(format!("{name}() requires an argument")))
+            .and_then(|arg| self.int_literal(arg))
     }
 
     /// `object.where(cond)` — keep the items for which `cond` is true.
@@ -550,8 +803,9 @@ impl Lower {
         let joined = self
             .dialect
             .build_array1(&self.dialect.to_json_scalar(&format!(
-                "string_agg({}, '{sep}')",
-                self.dialect.scalar_text("_e")
+                "string_agg({}, {})",
+                self.dialect.scalar_text("_e"),
+                sql_string(&sep)
             )));
         // join() over an empty collection yields the empty collection (null),
         // not an empty string. (FHIR/sql-on-fhir.js fn_join)
@@ -564,12 +818,12 @@ impl Lower {
     fn extension_fn(&self, coll: &str, url: &str) -> Result<String, Error> {
         let nav_ext = self.nav(coll, "extension");
         let n = self.fresh();
-        let url = url.replace('\'', "''");
+        let url = sql_string(url);
         let src = self
             .dialect
             .elements_table(&nav_ext, &format!("_x{n}"), "_e");
         Ok(format!(
-            "(SELECT {agg} FROM {src} WHERE _x{n}._e ->> 'url' = '{url}')",
+            "(SELECT {agg} FROM {src} WHERE _x{n}._e ->> 'url' = {url})",
             agg = self.dialect.agg(&format!("_x{n}._e")),
         ))
     }
@@ -591,7 +845,7 @@ impl Lower {
         );
         let guard = match type_arg {
             Some(t) => {
-                let ty = self.type_name(t)?.replace('\'', "''");
+                let ty = sql_string(&self.type_name(t)?);
                 // A contained resource's type is its declared `resourceType`,
                 // falling back to the Reference.type element; a normal
                 // reference's type is its leading path segment.
@@ -611,8 +865,8 @@ impl Lower {
                 );
                 format!(
                     " AND (CASE WHEN {is_frag} \
-                       THEN coalesce({contained_ty}, _r{n}._e ->> 'type') = '{ty}' \
-                       ELSE split_part({refexpr}, '/', 1) = '{ty}' END)"
+                       THEN coalesce({contained_ty}, _r{n}._e ->> 'type') = {ty} \
+                       ELSE split_part({refexpr}, '/', 1) = {ty} END)"
                 )
             }
             None => String::new(),
@@ -747,16 +1001,18 @@ impl Lower {
                 self.bool(&b.left, item)?,
                 self.bool(&b.right, item)?
             )),
-            Equal | Equivalent => Ok(format!(
+            Equal => Ok(format!(
                 "({} = {})",
                 self.scalar_jsonb(&b.left, item)?,
                 self.scalar_jsonb(&b.right, item)?
             )),
-            NotEqual | NotEquivalent => Ok(format!(
+            NotEqual => Ok(format!(
                 "({} <> {})",
                 self.scalar_jsonb(&b.left, item)?,
                 self.scalar_jsonb(&b.right, item)?
             )),
+            Equivalent => self.equivalent(b, item),
+            NotEquivalent => Ok(format!("(NOT {})", self.equivalent(b, item)?)),
             LessThan => self.cmp("<", b, item),
             LessThanOrEqual => self.cmp("<=", b, item),
             GreaterThan => self.cmp(">", b, item),
@@ -765,6 +1021,33 @@ impl Lower {
                 "unsupported boolean operator {other:?}"
             ))),
         }
+    }
+
+    /// `~` (FHIRPath §1.6.1.2): never empty; `{} ~ {}` is true and a value
+    /// is not equivalent to the empty collection. Strings are equivalent
+    /// ignoring case and treating every Unicode White_Space character as a
+    /// space, without collapsing runs or trimming (§1.6.1.2.3).
+    fn equivalent(
+        &self,
+        b: &octofhir_fhirpath::ast::BinaryOperationNode,
+        item: &str,
+    ) -> Result<String, Error> {
+        let l = self.scalar_jsonb(&b.left, item)?;
+        let r = self.scalar_jsonb(&b.right, item)?;
+        let whitespace = sql_string(&format!("[{WHITE_SPACE}]"));
+        let fold = |j: &str| {
+            format!(
+                "lower(regexp_replace({}, {whitespace}, ' ', 'g'))",
+                self.dialect.scalar_text(j)
+            )
+        };
+        Ok(format!(
+            "(CASE WHEN {ls} AND {rs} THEN {lf} = {rf} ELSE ({l} IS NOT DISTINCT FROM {r}) END)",
+            ls = self.dialect.is_string(&l),
+            rs = self.dialect.is_string(&r),
+            lf = fold(&l),
+            rf = fold(&r),
+        ))
     }
 
     fn cmp(
@@ -858,14 +1141,14 @@ impl Lower {
         let int = self.dialect.int_cast();
         let j = |x: &str| self.dialect.to_json_scalar(x);
         Ok(match v {
-            LiteralValue::String(s) => j(&format!("'{}'::{txt}", s.replace('\'', "''"))),
+            LiteralValue::String(s) => j(&format!("{}::{txt}", sql_string(s))),
             LiteralValue::Integer(i) | LiteralValue::Long(i) => j(&format!("{i}::{int}")),
             LiteralValue::Decimal(d) => j(&format!("{d}::{num}")),
             LiteralValue::Boolean(b) => j(&b.to_string()),
             LiteralValue::Date(_) | LiteralValue::DateTime(_) | LiteralValue::Time(_) => {
                 let s = v.to_string();
                 let s = s.trim_start_matches('@');
-                j(&format!("'{}'::{txt}", s.replace('\'', "''")))
+                j(&format!("{}::{txt}", sql_string(s)))
             }
             LiteralValue::Quantity { value, .. } => j(&format!("{value}::{num}")),
         })
@@ -918,3 +1201,16 @@ impl Lower {
         substitute_constants(path, &self.constants)
     }
 }
+
+/// `text` as an SQL string literal. Text that comes from a view (literals,
+/// separators, URLs, type names) reaches generated SQL only through this:
+/// standard SQL quoting, a quote doubled, which PostgreSQL (with the default
+/// `standard_conforming_strings`) and DuckDB both read literally.
+fn sql_string(text: &str) -> String {
+    format!("'{}'", text.replace('\'', "''"))
+}
+
+/// The Unicode White_Space characters (PropList.txt), which string
+/// equivalence treats as one another. Listed rather than `\s`, which
+/// PostgreSQL and DuckDB define differently.
+const WHITE_SPACE: &str = "\u{9}\u{a}\u{b}\u{c}\u{d}\u{20}\u{85}\u{a0}\u{1680}\u{2000}\u{2001}\u{2002}\u{2003}\u{2004}\u{2005}\u{2006}\u{2007}\u{2008}\u{2009}\u{200a}\u{2028}\u{2029}\u{202f}\u{205f}\u{3000}";

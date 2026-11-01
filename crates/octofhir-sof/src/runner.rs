@@ -1,24 +1,32 @@
-//! View execution against PostgreSQL.
+//! View execution through a database.
 //!
-//! This module provides the ViewRunner which executes generated SQL
-//! against a PostgreSQL database and returns structured results.
+//! [`SqlExecutor`] / [`run_with`] run generated SQL through any database
+//! layer. With the `postgres` feature, [`ViewRunner`] does the same over a
+//! bundled sqlx pool.
 
 use serde_json::Value;
+#[cfg(feature = "postgres")]
 use sqlx_core::row::Row;
+#[cfg(feature = "postgres")]
 use sqlx_core::sql_str::AssertSqlSafe;
+#[cfg(feature = "postgres")]
 use sqlx_postgres::{PgPool, PgRow};
 
-use crate::column::{ColumnInfo, ColumnType};
+use crate::Result;
+use crate::column::ColumnInfo;
+#[cfg(feature = "postgres")]
+use crate::column::ColumnType;
 use crate::sql_generator::{GeneratedColumn, SqlGenerator};
 use crate::view_definition::ViewDefinition;
-use crate::{Error, Result};
 
 /// Executes ViewDefinitions against a PostgreSQL database.
+#[cfg(feature = "postgres")]
 pub struct ViewRunner {
     pool: PgPool,
     generator: SqlGenerator,
 }
 
+#[cfg(feature = "postgres")]
 impl ViewRunner {
     /// Create a new ViewRunner with the given connection pool.
     pub fn new(pool: PgPool) -> Self {
@@ -46,7 +54,7 @@ impl ViewRunner {
         let rows = sqlx_core::query::query(AssertSqlSafe(generated.sql.clone()))
             .fetch_all(&self.pool)
             .await
-            .map_err(Error::Sql)?;
+            .map_err(crate::Error::Sql)?;
 
         let columns: Vec<ColumnInfo> = generated
             .columns
@@ -87,7 +95,7 @@ impl ViewRunner {
 /// example to reuse a host application's instrumented Postgres pool. Each
 /// returned inner `Vec` is one result row, with values in the same order as the
 /// supplied `columns`; implementations should coerce each value according to
-/// the column's [`ColumnType`].
+/// the column's [`ColumnType`](crate::ColumnType).
 #[async_trait::async_trait]
 pub trait SqlExecutor {
     /// Execute `sql` and return its rows as JSON values in `columns` order.
@@ -123,15 +131,26 @@ pub async fn run_with<E: SqlExecutor + ?Sized>(
 }
 
 /// Extract values from a row based on column definitions.
+#[cfg(feature = "postgres")]
 fn extract_row_values(row: &PgRow, columns: &[GeneratedColumn]) -> Vec<Value> {
     columns
         .iter()
         .enumerate()
-        .map(|(i, col)| extract_column_value(row, i, &col.col_type))
+        .map(|(i, col)| {
+            if col.json_scalar {
+                row.try_get::<Option<Value>, _>(i)
+                    .ok()
+                    .flatten()
+                    .unwrap_or(Value::Null)
+            } else {
+                extract_column_value(row, i, &col.col_type)
+            }
+        })
         .collect()
 }
 
 /// Extract a single column value from a row.
+#[cfg(feature = "postgres")]
 fn extract_column_value(row: &PgRow, index: usize, col_type: &ColumnType) -> Value {
     match col_type {
         ColumnType::Integer | ColumnType::Integer64 => row
@@ -244,6 +263,7 @@ impl ViewResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::column::ColumnType;
     use serde_json::json;
 
     #[test]

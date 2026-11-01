@@ -302,6 +302,7 @@ mod parquet_output {
         assert_eq!(batch.num_rows(), 2);
     }
 
+    #[cfg(feature = "postgres")]
     #[tokio::test]
     async fn postgres_uses_the_same_native_writer() {
         let Ok(url) = std::env::var("SOF_CONFORMANCE_DB") else {

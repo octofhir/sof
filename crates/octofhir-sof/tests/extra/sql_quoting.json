@@ -1,0 +1,73 @@
+{
+  "title": "sql_quoting",
+  "description": "Text from a view (a join separator, a string literal, an extension URL) reaches generated SQL as a quoted literal, never as SQL. A quote in it is data: the SQL engines give the same rows as the in-memory one, and a view cannot inject SQL into a server that runs views as SQL over its own database.",
+  "resources": [
+    {
+      "resourceType": "Patient",
+      "id": "p1",
+      "name": [
+        {
+          "family": "O'Neil",
+          "given": [
+            "Peter",
+            "James"
+          ]
+        }
+      ],
+      "extension": [
+        {
+          "url": "http://example.org/it's",
+          "valueString": "quoted"
+        }
+      ]
+    }
+  ],
+  "tests": [
+    {
+      "title": "a quote in a join separator, a literal and an extension url",
+      "view": {
+        "resource": "Patient",
+        "select": [
+          {
+            "column": [
+              {
+                "name": "id",
+                "path": "id",
+                "type": "id"
+              },
+              {
+                "name": "given",
+                "path": "name.given.join(' \\' ')",
+                "type": "string"
+              },
+              {
+                "name": "oneil",
+                "path": "name.family.first() = 'O\\'Neil'",
+                "type": "boolean"
+              },
+              {
+                "name": "ext",
+                "path": "extension('http://example.org/it\\'s').value.ofType(string).first()",
+                "type": "string"
+              },
+              {
+                "name": "drop",
+                "path": "name.given.join('\\')--')",
+                "type": "string"
+              }
+            ]
+          }
+        ]
+      },
+      "expect": [
+        {
+          "id": "p1",
+          "given": "Peter ' James",
+          "oneil": true,
+          "ext": "quoted",
+          "drop": "Peter')--James"
+        }
+      ]
+    }
+  ]
+}

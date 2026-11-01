@@ -36,6 +36,8 @@ pub struct SqlGenerator {
     row_filter: Option<String>,
     /// SQL dialect for the generated SELECT query.
     dialect: Dialect,
+    /// Relation the view reads from instead of the resource-type table.
+    source: Option<String>,
 }
 
 impl Default for SqlGenerator {
@@ -51,6 +53,7 @@ impl SqlGenerator {
             table_pattern: "base".to_string(),
             row_filter: Some("{base}.status <> 'deleted'".to_string()),
             dialect: Dialect::Postgres,
+            source: None,
         }
     }
 
@@ -77,6 +80,18 @@ impl SqlGenerator {
         self
     }
 
+    /// Read from `relation` (a table, view or CTE name with a `resource`
+    /// column) instead of the table named after the view's resource type.
+    ///
+    /// A host uses this to put its own selection under the view, e.g.
+    /// `WITH src AS (<authorized search>) <generated SQL>`, so the view sees
+    /// exactly the rows the caller may read. The name is emitted verbatim:
+    /// pass a trusted identifier, never user input.
+    pub fn with_source(mut self, relation: impl Into<String>) -> Self {
+        self.source = Some(relation.into());
+        self
+    }
+
     /// Generate SQL from a ViewDefinition.
     ///
     /// # Errors
@@ -92,7 +107,10 @@ impl SqlGenerator {
         }
 
         let constants = build_constants(view)?;
-        let table = view.resource.to_lowercase();
+        let table = self
+            .source
+            .clone()
+            .unwrap_or_else(|| view.resource.to_lowercase());
         let ctx0 = format!("{}.resource", self.table_pattern);
         let lower = Lower::new(view.resource.clone(), constants, ctx0.clone(), self.dialect);
 
@@ -147,6 +165,7 @@ impl SqlGenerator {
                 expression: c.expr.clone(),
                 alias: c.name.clone(),
                 col_type: c.col_type,
+                json_scalar: c.json_scalar,
             })
             .collect();
 
@@ -194,6 +213,7 @@ struct PlanColumn {
     name: String,
     expr: String,
     col_type: ColumnType,
+    json_scalar: bool,
 }
 
 /// One UNION ALL branch: a chain of lateral joins plus its output columns.
@@ -250,6 +270,12 @@ pub struct GeneratedColumn {
 
     /// Data type of the column.
     pub col_type: ColumnType,
+
+    /// The expression yields the element as a JSON scalar rather than a typed
+    /// SQL value: the column declares no `type`, so the value keeps its FHIR
+    /// JSON representation (boolean, number or string), as the in-memory
+    /// evaluator returns it. `col_type` is then `String`, the spec's default.
+    pub json_scalar: bool,
 }
 
 #[cfg(test)]
@@ -274,6 +300,22 @@ mod tests {
         assert!(g.sql.contains("FROM patient base"));
         assert_eq!(g.columns.len(), 2);
         assert_eq!(g.columns[0].name, "id");
+    }
+
+    #[test]
+    fn with_source_reads_from_the_given_relation() {
+        let view = ViewDefinition::from_json(&serde_json::json!({
+            "resource": "Patient",
+            "select": [{ "column": [{ "name": "id", "path": "id" }] }]
+        }))
+        .unwrap();
+        let g = SqlGenerator::new()
+            .with_source("sof_src")
+            .with_row_filter(None)
+            .generate(&view)
+            .unwrap();
+        assert!(g.sql.contains("FROM sof_src base"), "{}", g.sql);
+        assert!(!g.sql.contains("status"), "{}", g.sql);
     }
 
     #[test]

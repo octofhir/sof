@@ -18,10 +18,11 @@ exclude = ["tests/spec/**", "tests/extra/**"]
 [dependencies]
 # FHIR
 octofhir-fhirpath = { workspace = true }
+octofhir-fhir-model = { workspace = true }
 
-# Database
-sqlx-core = { workspace = true }
-sqlx-postgres = { workspace = true }
+# Database (feature `postgres`)
+sqlx-core = { workspace = true, optional = true }
+sqlx-postgres = { workspace = true, optional = true }
 
 # Serialization
 serde = { workspace = true }
@@ -47,7 +48,14 @@ tracing = { workspace = true }
 
 [features]
 default = []
+# Execute generated SQL against PostgreSQL with the bundled sqlx `ViewRunner`.
+# SQL generation itself needs no feature; hosts with their own pool implement
+# `SqlExecutor` instead.
+postgres = ["dep:sqlx-core", "dep:sqlx-postgres"]
 parquet = ["dep:arrow", "dep:parquet", "dep:chrono"]
+# `HttpTerminologyProvider` (+ `CachedTerminologyProvider`) for resolving
+# memberOf/subsumes/translate against a remote FHIR terminology server.
+tx-remote = ["octofhir-fhir-model/http-client", "octofhir-fhir-model/caching"]
 
 [dev-dependencies]
 bytes = { workspace = true }

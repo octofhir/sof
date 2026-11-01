@@ -13,7 +13,25 @@
 //!
 //! - [`ViewDefinition`] - Parsed representation of a FHIR ViewDefinition resource
 //! - [`SqlGenerator`] - Generates SQL from ViewDefinitions
-//! - [`ViewRunner`] - Executes views against a PostgreSQL database
+//! - [`CompiledView`] / [`execute`] - Database-free in-memory evaluation
+//! - [`SqlExecutor`] / [`run_with`] - Run generated SQL through any database layer
+//! - `ViewRunner` - Executes views against PostgreSQL (feature `postgres`)
+//!
+//! # Cargo features
+//!
+//! The default build has no database or network dependency (parsing, SQL
+//! generation for every dialect, in-memory evaluation). Optional backends are
+//! opt-in:
+//!
+//! - `postgres` — the bundled sqlx `ViewRunner`
+//! - `parquet` — the Parquet writer
+//! - `tx-remote` — `terminology::HttpTerminologyProvider` for
+//!   `memberOf()`/`subsumes()`/`translate()` against a remote terminology server
+//!
+//! # Terminology
+//!
+//! Terminology functions resolve through a [`TerminologyProvider`] passed in
+//! [`CompileOptions`]; without one they fail with a clear error.
 //!
 //! # Example
 //!
@@ -44,10 +62,23 @@ mod sql_generator;
 mod view_definition;
 
 pub use column::{ColumnInfo, ColumnType};
-pub use eval::{CompiledView, execute, execute_blocking, execute_parallel};
-pub use runner::{SqlExecutor, ViewResult, ViewRunner, run_with};
+pub use eval::{
+    CompileOptions, CompiledView, execute, execute_blocking, execute_parallel,
+    execute_parallel_with, execute_with,
+};
+#[cfg(feature = "postgres")]
+pub use runner::ViewRunner;
+pub use runner::{SqlExecutor, ViewResult, run_with};
 pub use sql_generator::{Dialect, GeneratedColumn, GeneratedSql, SqlGenerator, create_table};
 pub use view_definition::{Column, Constant, SelectColumn, ViewDefinition, WhereClause};
+
+pub use octofhir_fhir_model::TerminologyProvider;
+
+/// Terminology provider types, re-exported from `octofhir-fhir-model` so hosts
+/// can implement or construct one without a direct dependency.
+pub mod terminology {
+    pub use octofhir_fhir_model::terminology::*;
+}
 
 use thiserror::Error;
 
@@ -62,9 +93,14 @@ pub enum Error {
     #[error("Invalid path: {0}")]
     InvalidPath(String),
 
-    /// An error occurred while executing SQL.
+    /// An error occurred while executing SQL through the bundled sqlx runner.
+    #[cfg(feature = "postgres")]
     #[error("SQL execution error: {0}")]
     Sql(#[from] sqlx_core::error::Error),
+
+    /// An external [`SqlExecutor`] failed to run the generated SQL.
+    #[error("SQL execution error: {0}")]
+    Execution(String),
 
     /// An error occurred during FHIRPath evaluation or compilation.
     #[error("FHIRPath error: {0}")]

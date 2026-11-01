@@ -17,6 +17,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use octofhir_fhir_model::TerminologyProvider;
 use octofhir_fhirpath::core::error_code::FP0053;
 use octofhir_fhirpath::evaluator::AsyncNodeEvaluator;
 use octofhir_fhirpath::evaluator::function_registry::{
@@ -46,7 +47,20 @@ use crate::{Error, Result};
 /// column shape is inconsistent (duplicate names, mismatched `unionAll`
 /// branches), or a non-collection column yields more than one value.
 pub async fn execute(view: &ViewDefinition, resources: &[Value]) -> Result<ViewResult> {
-    let compiled = CompiledView::compile(view).await?;
+    execute_with(view, resources, &CompileOptions::default()).await
+}
+
+/// [`execute`] with explicit [`CompileOptions`] (e.g. a terminology provider).
+///
+/// # Errors
+///
+/// Same as [`execute`].
+pub async fn execute_with(
+    view: &ViewDefinition,
+    resources: &[Value],
+    options: &CompileOptions,
+) -> Result<ViewResult> {
+    let compiled = CompiledView::compile_with(view, options).await?;
     let mut data: Vec<Vec<Value>> = Vec::new();
     for resource in resources {
         data.extend(compiled.execute_resource(resource).await?);
@@ -98,6 +112,20 @@ pub fn execute_parallel(
     resources: &[Value],
     threads: usize,
 ) -> Result<ViewResult> {
+    execute_parallel_with(view, resources, threads, &CompileOptions::default())
+}
+
+/// [`execute_parallel`] with explicit [`CompileOptions`].
+///
+/// # Errors
+///
+/// Same as [`execute`].
+pub fn execute_parallel_with(
+    view: &ViewDefinition,
+    resources: &[Value],
+    threads: usize,
+    options: &CompileOptions,
+) -> Result<ViewResult> {
     let threads = threads.clamp(1, resources.len().max(1));
     let chunk = resources.len().div_ceil(threads).max(1);
     let runtime = || {
@@ -110,7 +138,7 @@ pub fn execute_parallel(
     // Compiled on a thread of its own too, so that calling this from inside an
     // async runtime never starts a runtime on that runtime's thread.
     let compiled = std::thread::scope(|s| {
-        s.spawn(|| runtime()?.block_on(CompiledView::compile(view)))
+        s.spawn(|| runtime()?.block_on(CompiledView::compile_with(view, options)))
             .join()
             .map_err(|_| panicked())?
     })?;
@@ -143,6 +171,32 @@ pub fn execute_parallel(
     })
 }
 
+/// Options for compiling a view.
+#[derive(Clone, Default)]
+pub struct CompileOptions {
+    /// Resolves the FHIRPath terminology functions (`memberOf()`,
+    /// `subsumes()`, `translate()`, `%terminologies`). Without one, a view that
+    /// calls them fails at evaluation with a clear error.
+    pub terminology: Option<Arc<dyn TerminologyProvider>>,
+}
+
+impl CompileOptions {
+    /// Options with a terminology provider.
+    pub fn with_terminology(provider: Arc<dyn TerminologyProvider>) -> Self {
+        Self {
+            terminology: Some(provider),
+        }
+    }
+}
+
+impl std::fmt::Debug for CompileOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CompileOptions")
+            .field("terminology", &self.terminology.is_some())
+            .finish()
+    }
+}
+
 /// A ViewDefinition compiled once for repeated, resource-at-a-time execution.
 ///
 /// Validates the view (columns, name collisions, constants) up front and builds
@@ -160,6 +214,11 @@ pub struct CompiledView {
 impl CompiledView {
     /// Compile and validate a ViewDefinition, building the FHIRPath engine.
     pub async fn compile(view: &ViewDefinition) -> Result<Self> {
+        Self::compile_with(view, &CompileOptions::default()).await
+    }
+
+    /// [`CompiledView::compile`] with explicit [`CompileOptions`].
+    pub async fn compile_with(view: &ViewDefinition, options: &CompileOptions) -> Result<Self> {
         if view.resource.trim().is_empty() {
             return Err(Error::InvalidViewDefinition(
                 "ViewDefinition is missing the required `resource`".to_string(),
@@ -188,6 +247,7 @@ impl CompiledView {
             constants,
             engine,
             model,
+            terminology: options.terminology.clone(),
             prepared: Default::default(),
         };
 
@@ -291,6 +351,7 @@ struct Evaluator {
     constants: std::collections::HashMap<String, String>,
     engine: FhirPathEngine,
     model: Arc<dyn ModelProvider + Send + Sync>,
+    terminology: Option<Arc<dyn TerminologyProvider>>,
     /// Column and forEach paths as the engine sees them, keyed on the path in
     /// the view. A view has a fixed set of paths but each is evaluated once per
     /// resource, so preparing (and parsing for a boundary call) once saves a
@@ -330,7 +391,7 @@ impl Evaluator {
         let ctx = EvaluationContext::new(
             Collection::from(vec![FhirPathValue::resource(focus.clone())]),
             self.model.clone(),
-            None,
+            self.terminology.clone(),
             None,
             None,
         );
@@ -342,11 +403,16 @@ impl Evaluator {
 
     /// Evaluate a (prepared) FHIRPath expression in an existing context.
     async fn eval_in(&self, path: &str, ctx: &EvaluationContext) -> Result<Vec<Value>> {
-        let result = self
-            .engine
-            .evaluate(path, ctx)
-            .await
-            .map_err(|e| Error::FhirPath(e.to_string()))?;
+        let result = self.engine.evaluate(path, ctx).await.map_err(|e| {
+            let message = e.to_string();
+            if self.terminology.is_none() && message.contains("terminology provider") {
+                Error::FhirPath(format!(
+                    "{message} (pass one in CompileOptions::terminology)"
+                ))
+            } else {
+                Error::FhirPath(message)
+            }
+        })?;
 
         Ok(collection_to_json(&result.value))
     }

@@ -46,6 +46,17 @@ impl Dialect {
         }
     }
 
+    /// Aggregate a column of JSON values into a JSON array in `order`,
+    /// defaulting an empty group to the empty array.
+    pub(super) fn agg_ordered(self, x: &str, order: &str) -> String {
+        if self.is_duckdb() {
+            // json_group_array is a macro and takes no ORDER BY; list() does.
+            format!("coalesce(to_json(list({x} ORDER BY {order})),'[]'::JSON)")
+        } else {
+            format!("coalesce(jsonb_agg({x} ORDER BY {order}),'[]'::jsonb)")
+        }
+    }
+
     /// Extract a JSON scalar as text (Postgres `#>> '{}'`, DuckDB `->> '$'`).
     pub(super) fn scalar_text(self, j: &str) -> String {
         if self.is_duckdb() {

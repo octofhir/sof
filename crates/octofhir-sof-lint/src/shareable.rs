@@ -150,6 +150,16 @@ fn walk(expr: &ExpressionNode, location: &str, allowed: &[String], out: &mut Vec
                 walk(e, location, allowed, out);
             }
         }
+        ExpressionNode::InstanceSelector(s) => {
+            out.push(finding(
+                Severity::Error,
+                location,
+                "instance selector `{ ... }` is not in the Shareable FHIRPath subset".into(),
+            ));
+            for (_, value) in &s.elements {
+                walk(value, location, allowed, out);
+            }
+        }
         ExpressionNode::Lambda(l) => walk(&l.body, location, allowed, out),
         ExpressionNode::Path(p) => walk(&p.base, location, allowed, out),
         // Identifiers, variables ($this/%constants) and type-info references are
