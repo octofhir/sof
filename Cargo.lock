@@ -2426,10 +2426,11 @@ dependencies = [
 
 [[package]]
 name = "octofhir-sof"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "arrow",
  "async-trait",
+ "base64 0.22.1",
  "bytes",
  "chrono",
  "csv",
@@ -2438,6 +2439,7 @@ dependencies = [
  "octofhir-fhirpath",
  "parquet",
  "pin-project-lite",
+ "regex",
  "serde",
  "serde_json",
  "sqlx-core",
@@ -2451,7 +2453,7 @@ dependencies = [
 
 [[package]]
 name = "octofhir-sof-cli"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "annotate-snippets",
  "anyhow",
@@ -2470,7 +2472,7 @@ dependencies = [
 
 [[package]]
 name = "octofhir-sof-lint"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "banshee_hir",
  "banshee_parser",

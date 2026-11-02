@@ -4,6 +4,40 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.3.0]
+
+### Added
+
+What a SQL on FHIR v3 runner needs beyond views, as host-independent modules
+(no database, network or clock): a server, the CLI or an embedded DuckDB runner
+plug in only where artifacts come from and how SQL runs.
+
+- `library`: SQLQuery / SQLView Libraries: the SQL of a requested dialect else
+  the portable one, `relatedArtifact` dependencies, declared parameters, and
+  `bind_parameters` (by name and declared type, missing required refused).
+- `plan`: the dependency graph of a `$sql-run` / `$sql-export` job as Common
+  Operation Behavior specifies it: one resolution per canonical, `context`
+  entries first (no url, two sharing a url, or one matching nothing refused),
+  SQLViews resolved transitively with cycle and depth limits, a label naming two
+  artifacts refused, CTEs in dependency order (`closure`). The host supplies
+  artifacts through `ArtifactSource`; the result (`ResolvedJob`) is serde data an
+  async job can store.
+- `relations`: Terminology in SQL (trial use). ValueSet relation `system,
+  version, code, display, inactive` (unique on the first three, abstract entries
+  excluded, nested entries flattened, partial expansions refused); ConceptMap
+  relation of nine columns (noMap rows kept, `dependsOn` / `product` /
+  `valueSet` / source-less groups refused, `unmapped` never applied, R4 maps
+  converted); provenance records.
+- `expansion`: a strict ValueSet expander for those relations: the ValueSet's
+  own complete expansion, else `compose` (enumerated codes, whole complete code
+  systems, hierarchy and property filters, imports intersected with the system
+  part, excludes, `compose.inactive`), naming anything it cannot determine
+  instead of leaving it out; optional designations. Lookups go through the
+  host's `TerminologySource`; identifier and timestamp come from the host.
+- `output::RowEncoder` / `RowFormat`: row-at-a-time ndjson, csv and json for
+  streamed exports (JSON object text in column order passes through).
+- `Error::InvalidLibrary`, `Error::InvalidParameter`.
+
 ## [0.2.1]
 
 ### Security
