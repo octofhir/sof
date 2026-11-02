@@ -4,6 +4,37 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.3.1] — 2026-11-03
+
+### Added
+
+- `library::build_annotated`: a SQLQuery / SQLView Library from SQL carrying
+  annotations in its comments (`@name`, `@title`, `@description`, `@version`,
+  `@status`, `@author`, `@publisher`, `@param`, `@relatedDependency`), with the
+  `sql-text` extension, checked by reading it back; unrecognized annotations
+  are reported.
+- `ViewDefinition::validate`: the structural rules of 3.0 — SQL names for the
+  view, constants and columns (`sql-name`), at most one of `forEach`,
+  `forEachOrNull` and `repeat` per select (`sql-expressions`), `unionAll`
+  branches with the same columns and declared types. Compiling and SQL
+  generation check them; parsing still accepts any view, so a linter can
+  report on it.
+- `output::ParquetStreamEncoder` (feature `parquet`): a Parquet file encoded
+  row by row in row groups, handing back the bytes to write, for streamed
+  exports.
+- `Dialect::value_type`: the column type generated SQL gives a view column, so
+  a host materializing rows computed elsewhere declares the same types (a
+  partial date stays text).
+- `expansion::Expander::with_designations`.
+- The examples of the 3.0 guide are tests: every Library reads in both
+  dialects, every ViewDefinition validates, compiles and lowers to SQL.
+
+### Changed
+
+- Documentation, README and banner describe SQL on FHIR 3.0
+  (`hl7.fhir.uv.sql-on-fhir`); links point at the HL7 build. The vendored
+  content tests are refreshed from FHIR/sql-on-fhir.js.
+
 ## [0.3.0]
 
 ### Added
