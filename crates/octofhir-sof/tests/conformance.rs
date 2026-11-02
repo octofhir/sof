@@ -1,6 +1,6 @@
 //! SQL-on-FHIR v2 content-test conformance harness.
 //!
-//! Loads the official `sql-on-fhir-v2` content tests (the `tests/*.json` files),
+//! Loads the official SQL on FHIR content tests (the `tests/*.json` files),
 //! materialises each test's resources into a PostgreSQL table shaped like the one
 //! [`crate::ViewRunner`] expects, runs every ViewDefinition through
 //! [`SqlGenerator`], executes the generated SQL and compares the produced rows

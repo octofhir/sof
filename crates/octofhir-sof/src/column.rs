@@ -139,10 +139,10 @@ impl ColumnType {
         }
     }
 
-    /// The default ANSI SQL (ISO/IEC 9075) type per the SQL-on-FHIR v2 spec's
-    /// type-mapping table. Temporal and decimal types map to `CHARACTER VARYING`
+    /// The default ANSI SQL (ISO/IEC 9075) type per the SQL on FHIR
+    /// ViewDefinition "Default Type Mappings" table. Temporal and decimal types map to `CHARACTER VARYING`
     /// to preserve the FHIR string representation; `instant` keeps timezone.
-    /// <https://build.fhir.org/ig/FHIR/sql-on-fhir-v2/StructureDefinition-ViewDefinition-notes.html>
+    /// <https://build.fhir.org/ig/HL7/sql-on-fhir/StructureDefinition-ViewDefinition.html>
     pub fn ansi_type(&self) -> &'static str {
         match self {
             // string, code, uri, url, canonical, id, oid, uuid, markdown,

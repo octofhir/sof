@@ -1,6 +1,6 @@
 {
   "title": "contained_resource_keys",
-  "description": "getReferenceKey/getResourceKey over contained resources. Contained resources are keyed as independent resources, so a fragment (#id) reference resolves into the resource's contained[] and its key matches getResourceKey() on that contained resource. See https://build.fhir.org/ig/FHIR/sql-on-fhir-v2/functional-model.html (getResourceKey/getReferenceKey; contained resources are extracted into independent resources).",
+  "description": "getReferenceKey/getResourceKey over contained resources. Contained resources are keyed as independent resources, so a fragment (#id) reference resolves into the resource's contained[] and its key matches getResourceKey() on that contained resource. See https://build.fhir.org/ig/HL7/sql-on-fhir/StructureDefinition-ViewDefinition.html (getResourceKey/getReferenceKey; contained resources are extracted into independent resources).",
   "resources": [
     {
       "resourceType": "Patient",

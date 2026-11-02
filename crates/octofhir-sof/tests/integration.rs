@@ -90,14 +90,14 @@ fn union_all_produces_single_query() {
 
 #[test]
 fn union_all_shape_mismatch_is_error() {
-    let view = ViewDefinition::from_json(&json!({
+    let mismatched = json!({
         "resource": "Patient",
         "select": [{ "unionAll": [
             { "column": [{ "name": "a", "path": "id" }, { "name": "b", "path": "id" }] },
             { "column": [{ "name": "b", "path": "id" }, { "name": "a", "path": "id" }] }
         ] }]
-    }))
-    .unwrap();
+    });
+    let view: ViewDefinition = serde_json::from_value(mismatched).unwrap();
     assert!(SqlGenerator::new().generate(&view).is_err());
 }
 

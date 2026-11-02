@@ -6,7 +6,7 @@
 //! flags anything outside that subset.
 //!
 //! Tiers (source: SQL-on-FHIR v2 ShareableViewDefinition notes,
-//! <https://build.fhir.org/ig/FHIR/sql-on-fhir-v2/StructureDefinition-ShareableViewDefinition.html>):
+//! <https://build.fhir.org/ig/HL7/sql-on-fhir/StructureDefinition-ShareableViewDefinition.html>):
 //!
 //! - **Required** (allowed): literals String/Integer/Decimal (and Boolean, used
 //!   by the comparison/boolean operators); functions `where`, `exists`,

@@ -20,7 +20,9 @@ pub use rows::{RowEncoder, RowFormat};
 mod parquet_writer;
 
 #[cfg(feature = "parquet")]
-pub use parquet_writer::{ParquetCompression, ParquetWriter, TemporalEncoding};
+pub use parquet_writer::{
+    ParquetCompression, ParquetStreamEncoder, ParquetWriter, TemporalEncoding,
+};
 
 use std::io::Write;
 use std::pin::Pin;

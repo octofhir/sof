@@ -219,6 +219,7 @@ impl CompiledView {
 
     /// [`CompiledView::compile`] with explicit [`CompileOptions`].
     pub async fn compile_with(view: &ViewDefinition, options: &CompileOptions) -> Result<Self> {
+        view.validate()?;
         if view.resource.trim().is_empty() {
             return Err(Error::InvalidViewDefinition(
                 "ViewDefinition is missing the required `resource`".to_string(),

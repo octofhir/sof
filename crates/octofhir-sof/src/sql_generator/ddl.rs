@@ -45,6 +45,33 @@ impl fmt::Display for Dialect {
 }
 
 impl Dialect {
+    /// The type the generated SQL gives a column of type `ty` in this
+    /// dialect: numbers and booleans cast, a collection as JSON, everything
+    /// else as text in its FHIR string representation (the spec's default
+    /// mapping of date, dateTime, time and the string types to CHARACTER
+    /// VARYING). A host that materializes a view's rows computed elsewhere
+    /// (the in-memory engine) declares its table with these types, so both
+    /// paths give a query the same column types.
+    pub fn value_type(self, ty: ColumnType) -> &'static str {
+        match (self, ty) {
+            (Self::DuckDb, ColumnType::Integer | ColumnType::Integer64) => "BIGINT",
+            (Self::DuckDb, ColumnType::Decimal) => "DECIMAL(38,9)",
+            (Self::DuckDb, ColumnType::Boolean) => "BOOLEAN",
+            (Self::DuckDb, ColumnType::Json) => "JSON",
+            (Self::DuckDb, _) => "VARCHAR",
+            (Self::Ansi, ColumnType::Integer | ColumnType::Integer64) => "BIGINT",
+            (Self::Ansi, ColumnType::Decimal) => "DECIMAL",
+            (Self::Ansi, ColumnType::Boolean) => "BOOLEAN",
+            (Self::Ansi, ColumnType::Json) => "JSON",
+            (Self::Ansi, _) => "CHARACTER VARYING",
+            (Self::Postgres, ColumnType::Integer | ColumnType::Integer64) => "bigint",
+            (Self::Postgres, ColumnType::Decimal) => "numeric",
+            (Self::Postgres, ColumnType::Boolean) => "boolean",
+            (Self::Postgres, ColumnType::Json) => "jsonb",
+            (Self::Postgres, _) => "text",
+        }
+    }
+
     /// The dialect's type name for a column type.
     fn type_name(&self, ty: ColumnType) -> &'static str {
         match self {
@@ -144,5 +171,18 @@ mod tests {
         assert_eq!("pg".parse::<Dialect>().unwrap(), Dialect::Postgres);
         assert_eq!("DuckDB".parse::<Dialect>().unwrap(), Dialect::DuckDb);
         assert!("oracle".parse::<Dialect>().is_err());
+    }
+
+    #[test]
+    fn value_types_follow_the_generated_sql() {
+        assert_eq!(Dialect::Postgres.value_type(ColumnType::Date), "text");
+        assert_eq!(Dialect::Postgres.value_type(ColumnType::Instant), "text");
+        assert_eq!(Dialect::Postgres.value_type(ColumnType::Integer), "bigint");
+        assert_eq!(Dialect::Postgres.value_type(ColumnType::Decimal), "numeric");
+        assert_eq!(Dialect::DuckDb.value_type(ColumnType::Json), "JSON");
+        assert_eq!(
+            Dialect::Ansi.value_type(ColumnType::Time),
+            "CHARACTER VARYING"
+        );
     }
 }

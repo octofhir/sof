@@ -1,6 +1,6 @@
 //! In-memory SQL-on-FHIR v2 conformance harness.
 //!
-//! Runs the official `sql-on-fhir-v2` content tests through the database-free
+//! Runs the official SQL on FHIR content tests through the database-free
 //! [`octofhir_sof::execute`] evaluator and compares the produced rows against
 //! each test's expectation. Unlike `tests/conformance.rs` this needs no
 //! PostgreSQL — it runs whenever the test-case checkout is present (the sibling

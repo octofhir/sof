@@ -186,12 +186,125 @@ impl ViewDefinition {
         serde_json::from_str(s).map_err(|e| Error::InvalidViewDefinition(e.to_string()))
     }
 
+    /// Check the structural invariants of a ViewDefinition (SQL on FHIR
+    /// 3.0.0): `name`, `constant.name` and `select.column.name` are SQL
+    /// names (`sql-name`, `^[A-Za-z][A-Za-z0-9_]*$`); a select carries at
+    /// most one of `forEach`, `forEachOrNull` and `repeat`
+    /// (`sql-expressions`); the branches of a `unionAll` have the same
+    /// columns, in the same order, with the same declared types. Parsing
+    /// does not check them (a linter reads invalid views too); compiling and
+    /// SQL generation do.
+    pub fn validate(&self) -> Result<(), Error> {
+        let invalid = |message: String| Err(Error::InvalidViewDefinition(message));
+        if let Some(name) = &self.name
+            && !is_sql_name(name)
+        {
+            return invalid(format!(
+                "name {name:?} is not a SQL name ([A-Za-z][A-Za-z0-9_]*)"
+            ));
+        }
+        for constant in &self.constant {
+            if !is_sql_name(&constant.name) {
+                return invalid(format!(
+                    "constant name {:?} is not a SQL name ([A-Za-z][A-Za-z0-9_]*)",
+                    constant.name
+                ));
+            }
+        }
+        validate_selects(&self.select)
+    }
+
     /// Get the list of all column names defined in this view.
     pub fn column_names(&self) -> Vec<String> {
         let mut names = Vec::new();
         collect_column_names(&self.select, &mut names);
         names
     }
+}
+
+/// `sql-name`: `^[A-Za-z][A-Za-z0-9_]*$`.
+fn is_sql_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|first| first.is_ascii_alphabetic())
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+fn validate_selects(selects: &[SelectColumn]) -> Result<(), Error> {
+    for select in selects {
+        let directives = usize::from(select.for_each.is_some())
+            + usize::from(select.for_each_or_null.is_some())
+            + usize::from(!select.repeat.is_empty());
+        if directives > 1 {
+            return Err(Error::InvalidViewDefinition(
+                "a select carries at most one of forEach, forEachOrNull and repeat".into(),
+            ));
+        }
+        for column in select.column.iter().flatten() {
+            if !is_sql_name(&column.name) {
+                return Err(Error::InvalidViewDefinition(format!(
+                    "column name {:?} is not a SQL name ([A-Za-z][A-Za-z0-9_]*)",
+                    column.name
+                )));
+            }
+        }
+        validate_selects(&select.select)?;
+        if let Some(branches) = &select.union_all {
+            validate_selects(branches)?;
+            let shapes: Vec<Vec<(String, Option<String>)>> =
+                branches.iter().map(declared_shape).collect();
+            if let Some(first) = shapes.first() {
+                for other in &shapes[1..] {
+                    let same_names = first.len() == other.len()
+                        && first.iter().zip(other).all(|(a, b)| a.0 == b.0);
+                    if !same_names {
+                        return Err(Error::InvalidViewDefinition(
+                            "unionAll branches have mismatched column shape".into(),
+                        ));
+                    }
+                    if let Some(((name, a), (_, b))) = first
+                        .iter()
+                        .zip(other)
+                        .find(|((_, a), (_, b))| matches!((a, b), (Some(a), Some(b)) if a != b))
+                    {
+                        return Err(Error::InvalidViewDefinition(format!(
+                            "unionAll branches give column {name} different types ({} and {})",
+                            a.as_deref().unwrap_or_default(),
+                            b.as_deref().unwrap_or_default()
+                        )));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A select's columns with their declared types (`ansi/type` tag, else
+/// `type`), in output order.
+fn declared_shape(select: &SelectColumn) -> Vec<(String, Option<String>)> {
+    let mut shape = Vec::new();
+    for column in select.column.iter().flatten() {
+        let declared = column
+            .tag
+            .iter()
+            .find(|tag| tag.name == "ansi/type")
+            .and_then(|tag| tag.value.clone())
+            .or_else(|| column.col_type.clone());
+        shape.push((column.name.clone(), declared));
+    }
+    for nested in &select.select {
+        shape.extend(declared_shape(nested));
+    }
+    if let Some(first) = select
+        .union_all
+        .as_ref()
+        .and_then(|branches| branches.first())
+    {
+        shape.extend(declared_shape(first));
+    }
+    shape
 }
 
 /// Recursively collect column names from select clauses.
@@ -398,5 +511,59 @@ mod tests {
             values: Default::default(),
         };
         assert_eq!(bool_const.value(), Value::Bool(true));
+    }
+
+    #[test]
+    fn v3_invariants_are_checked() {
+        let view = |select: serde_json::Value| {
+            serde_json::json!({"resourceType": "ViewDefinition", "name": "v", "status": "active",
+                "resource": "Patient", "select": select})
+        };
+        let ok = view(serde_json::json!([{"column": [{"name": "id", "path": "id"}]}]));
+        assert!(ViewDefinition::from_json(&ok).unwrap().validate().is_ok());
+        let cases = [
+            serde_json::json!([{"forEach": "name", "forEachOrNull": "name",
+                "column": [{"name": "f", "path": "family"}]}]),
+            serde_json::json!([{"forEach": "name", "repeat": ["item"],
+                "column": [{"name": "f", "path": "family"}]}]),
+            serde_json::json!([{"column": [{"name": "family-name", "path": "id"}]}]),
+            serde_json::json!([{"column": [{"name": "_id", "path": "id"}]}]),
+            serde_json::json!([{"unionAll": [
+                {"column": [{"name": "a", "path": "id", "type": "string"}]},
+                {"column": [{"name": "a", "path": "id", "type": "integer"}]}]}]),
+            serde_json::json!([{"unionAll": [
+                {"column": [{"name": "a", "path": "id"}]},
+                {"column": [{"name": "b", "path": "id"}]}]}]),
+        ];
+        for select in cases {
+            let parsed = ViewDefinition::from_json(&view(select.clone())).unwrap();
+            assert!(parsed.validate().is_err(), "{select}");
+        }
+        let mut bad_name = ok.clone();
+        bad_name["name"] = serde_json::json!("patient-view");
+        assert!(
+            ViewDefinition::from_json(&bad_name)
+                .unwrap()
+                .validate()
+                .is_err()
+        );
+        let mut bad_constant = ok.clone();
+        bad_constant["constant"] = serde_json::json!([{"name": "1st", "valueString": "x"}]);
+        assert!(
+            ViewDefinition::from_json(&bad_constant)
+                .unwrap()
+                .validate()
+                .is_err()
+        );
+        // A declared type on one side only is not a conflict.
+        let one_sided = view(serde_json::json!([{"unionAll": [
+            {"column": [{"name": "a", "path": "id", "type": "string"}]},
+            {"column": [{"name": "a", "path": "id"}]}]}]));
+        assert!(
+            ViewDefinition::from_json(&one_sided)
+                .unwrap()
+                .validate()
+                .is_ok()
+        );
     }
 }

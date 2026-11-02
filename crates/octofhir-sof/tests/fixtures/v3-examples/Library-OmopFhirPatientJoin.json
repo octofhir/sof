@@ -1,0 +1,93 @@
+{
+  "resourceType": "Library",
+  "id": "OmopFhirPatientJoin",
+  "meta": {
+    "profile": [
+      "http://hl7.org/fhir/uv/sql-on-fhir/StructureDefinition/SQLQuery"
+    ]
+  },
+  "url": "http://hl7.org/fhir/uv/sql-on-fhir/Library/OmopFhirPatientJoin",
+  "identifier": [
+    {
+      "system": "urn:ietf:rfc:3986",
+      "value": "urn:oid:2.16.840.1.113883.4.642.40.77.28.3"
+    }
+  ],
+  "version": "3.0.0-ballot",
+  "name": "OmopFhirPatientJoin",
+  "title": "OMOP/FHIR Patient Match with Diagnoses",
+  "status": "active",
+  "type": {
+    "coding": [
+      {
+        "system": "http://hl7.org/fhir/uv/sql-on-fhir/CodeSystem/LibraryTypesCodes",
+        "code": "sql-query"
+      }
+    ]
+  },
+  "date": "2026-10-13T03:59:03+00:00",
+  "publisher": "HL7 International / FHIR Infrastructure",
+  "contact": [
+    {
+      "name": "HL7 International / FHIR Infrastructure",
+      "telecom": [
+        {
+          "system": "url",
+          "value": "http://www.hl7.org/Special/committees/fiwg"
+        }
+      ]
+    }
+  ],
+  "description": "Uses labels to disambiguate patient views from different sources and joins\npatient diagnoses for downstream analytics.\n\n```sql\nSELECT\n  omop_person.person_id AS omop_person_id,\n  fhir_patient.id AS fhir_patient_id,\n  fhir_patient.name,\n  diagnoses_view.code AS diagnosis_code,\n  diagnoses_view.display AS diagnosis_display\nFROM omop_person\nJOIN fhir_patient\n  ON omop_person.person_id = fhir_patient.mrn\nJOIN diagnoses_view\n  ON diagnoses_view.patient_id = fhir_patient.id\nWHERE omop_person.source_system = :source_system\n```",
+  "jurisdiction": [
+    {
+      "coding": [
+        {
+          "system": "http://unstats.un.org/unsd/methods/m49/m49.htm",
+          "code": "001",
+          "display": "World"
+        }
+      ]
+    }
+  ],
+  "relatedArtifact": [
+    {
+      "type": "depends-on",
+      "label": "omop_person",
+      "display": "OMOP Person view",
+      "resource": "https://example.org/omop/ViewDefinition/Patient"
+    },
+    {
+      "type": "depends-on",
+      "label": "fhir_patient",
+      "display": "FHIR Patient view",
+      "resource": "https://example.org/fhir/ViewDefinition/Patient"
+    },
+    {
+      "type": "depends-on",
+      "label": "diagnoses_view",
+      "display": "Diagnosis facts view",
+      "resource": "https://example.org/ViewDefinition/diagnoses_view"
+    }
+  ],
+  "parameter": [
+    {
+      "name": "source_system",
+      "use": "in",
+      "documentation": "Source system identifier for OMOP records",
+      "type": "string"
+    }
+  ],
+  "content": [
+    {
+      "extension": [
+        {
+          "url": "http://hl7.org/fhir/uv/sql-on-fhir/StructureDefinition/sql-text",
+          "valueString": "SELECT\n  omop_person.person_id AS omop_person_id,\n  fhir_patient.id AS fhir_patient_id,\n  fhir_patient.name,\n  diagnoses_view.code AS diagnosis_code,\n  diagnoses_view.display AS diagnosis_display\nFROM omop_person\nJOIN fhir_patient\n  ON omop_person.person_id = fhir_patient.mrn\nJOIN diagnoses_view\n  ON diagnoses_view.patient_id = fhir_patient.id\nWHERE omop_person.source_system = :source_system"
+        }
+      ],
+      "contentType": "application/sql",
+      "data": "U0VMRUNUCiAgb21vcF9wZXJzb24ucGVyc29uX2lkIEFTIG9tb3BfcGVyc29uX2lkLAogIGZoaXJfcGF0aWVudC5pZCBBUyBmaGlyX3BhdGllbnRfaWQsCiAgZmhpcl9wYXRpZW50Lm5hbWUsCiAgZGlhZ25vc2VzX3ZpZXcuY29kZSBBUyBkaWFnbm9zaXNfY29kZSwKICBkaWFnbm9zZXNfdmlldy5kaXNwbGF5IEFTIGRpYWdub3Npc19kaXNwbGF5CkZST00gb21vcF9wZXJzb24KSk9JTiBmaGlyX3BhdGllbnQKICBPTiBvbW9wX3BlcnNvbi5wZXJzb25faWQgPSBmaGlyX3BhdGllbnQubXJuCkpPSU4gZGlhZ25vc2VzX3ZpZXcKICBPTiBkaWFnbm9zZXNfdmlldy5wYXRpZW50X2lkID0gZmhpcl9wYXRpZW50LmlkCldIRVJFIG9tb3BfcGVyc29uLnNvdXJjZV9zeXN0ZW0gPSA6c291cmNlX3N5c3RlbQ=="
+    }
+  ]
+}

@@ -1,6 +1,6 @@
 {
   "title": "untyped_columns",
-  "description": "A non-collection column with no declared type keeps the FHIR JSON representation of its primitive: a boolean stays a boolean, an integer a number, a string a string. Column type inference is optional and treating undeclared types as strings is allowed (https://build.fhir.org/ig/FHIR/sql-on-fhir-v2/StructureDefinition-ViewDefinition.html#column-types), but every engine of this runner (in-memory, PostgreSQL, DuckDB) must return the same values for the same view.",
+  "description": "A non-collection column with no declared type keeps the FHIR JSON representation of its primitive: a boolean stays a boolean, an integer a number, a string a string. Column type inference is optional and treating undeclared types as strings is allowed (https://build.fhir.org/ig/HL7/sql-on-fhir/StructureDefinition-ViewDefinition.html#column-types), but every engine of this runner (in-memory, PostgreSQL, DuckDB) must return the same values for the same view.",
   "resources": [
     {
       "resourceType": "Patient",

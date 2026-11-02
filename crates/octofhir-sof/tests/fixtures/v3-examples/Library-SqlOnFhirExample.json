@@ -1,0 +1,102 @@
+{
+  "resourceType": "Library",
+  "id": "SqlOnFhirExample",
+  "meta": {
+    "profile": [
+      "http://hl7.org/fhir/uv/sql-on-fhir/StructureDefinition/SQLQuery"
+    ]
+  },
+  "url": "http://hl7.org/fhir/uv/sql-on-fhir/Library/SqlOnFhirExample",
+  "identifier": [
+    {
+      "system": "urn:ietf:rfc:3986",
+      "value": "urn:oid:2.16.840.1.113883.4.642.40.77.28.4"
+    }
+  ],
+  "version": "3.0.0-ballot",
+  "name": "SqlOnFhirExample",
+  "title": "Blood Pressure Trend Report",
+  "status": "active",
+  "type": {
+    "coding": [
+      {
+        "system": "http://hl7.org/fhir/uv/sql-on-fhir/CodeSystem/LibraryTypesCodes",
+        "code": "sql-query"
+      }
+    ]
+  },
+  "date": "2026-10-13T03:59:03+00:00",
+  "publisher": "HL7 International / FHIR Infrastructure",
+  "contact": [
+    {
+      "name": "HL7 International / FHIR Infrastructure",
+      "telecom": [
+        {
+          "system": "url",
+          "value": "http://www.hl7.org/Special/committees/fiwg"
+        }
+      ]
+    }
+  ],
+  "description": "Demonstrates SQL annotations that tooling can use to generate Library metadata.\n\n```sql\n/*\n@name: SqlOnFhirExample\n@title: Blood Pressure Trend Report\n@description: Return blood pressure observations for a patient in a date range\n@version: 1.0.0\n@status: active\n@author: Clinical Informatics Team\n@publisher: Regional Medical Center\n*/\n\n-- @relatedDependency: https://example.org/ViewDefinition/patient_view as patient_view\n-- @relatedDependency: https://example.org/ViewDefinition/blood_pressure_view as blood_pressure_view\n-- @param: patient_id string Patient identifier\n-- @param: from_date date Start date (inclusive)\n-- @param: to_date date End date (inclusive)\nSELECT\n  patient_view.id AS patient_id,\n  patient_view.name,\n  blood_pressure_view.systolic,\n  blood_pressure_view.diastolic,\n  blood_pressure_view.effective_date\nFROM patient_view\nJOIN blood_pressure_view\n  ON patient_view.id = blood_pressure_view.patient_id\nWHERE patient_view.id = :patient_id\n  AND blood_pressure_view.effective_date >= :from_date\n  AND blood_pressure_view.effective_date <= :to_date\nORDER BY blood_pressure_view.effective_date\n```",
+  "jurisdiction": [
+    {
+      "coding": [
+        {
+          "system": "http://unstats.un.org/unsd/methods/m49/m49.htm",
+          "code": "001",
+          "display": "World"
+        }
+      ]
+    }
+  ],
+  "author": [
+    {
+      "name": "Clinical Informatics Team"
+    }
+  ],
+  "relatedArtifact": [
+    {
+      "type": "depends-on",
+      "label": "patient_view",
+      "resource": "https://example.org/ViewDefinition/patient_view"
+    },
+    {
+      "type": "depends-on",
+      "label": "blood_pressure_view",
+      "resource": "https://example.org/ViewDefinition/blood_pressure_view"
+    }
+  ],
+  "parameter": [
+    {
+      "name": "patient_id",
+      "use": "in",
+      "documentation": "Patient identifier",
+      "type": "string"
+    },
+    {
+      "name": "from_date",
+      "use": "in",
+      "documentation": "Start date for observations",
+      "type": "date"
+    },
+    {
+      "name": "to_date",
+      "use": "in",
+      "documentation": "End date for observations",
+      "type": "date"
+    }
+  ],
+  "content": [
+    {
+      "extension": [
+        {
+          "url": "http://hl7.org/fhir/uv/sql-on-fhir/StructureDefinition/sql-text",
+          "valueString": "/*\n@name: SqlOnFhirExample\n@title: Blood Pressure Trend Report\n@description: Return blood pressure observations for a patient in a date range\n@version: 1.0.0\n@status: active\n@author: Clinical Informatics Team\n@publisher: Regional Medical Center\n*/\n\n-- @relatedDependency: https://example.org/ViewDefinition/patient_view as patient_view\n-- @relatedDependency: https://example.org/ViewDefinition/blood_pressure_view as blood_pressure_view\n-- @param: patient_id string Patient identifier\n-- @param: from_date date Start date (inclusive)\n-- @param: to_date date End date (inclusive)\nSELECT\n  patient_view.id AS patient_id,\n  patient_view.name,\n  blood_pressure_view.systolic,\n  blood_pressure_view.diastolic,\n  blood_pressure_view.effective_date\nFROM patient_view\nJOIN blood_pressure_view\n  ON patient_view.id = blood_pressure_view.patient_id\nWHERE patient_view.id = :patient_id\n  AND blood_pressure_view.effective_date >= :from_date\n  AND blood_pressure_view.effective_date <= :to_date\nORDER BY blood_pressure_view.effective_date"
+        }
+      ],
+      "contentType": "application/sql",
+      "data": "LyoKQG5hbWU6IFNxbE9uRmhpckV4YW1wbGUKQHRpdGxlOiBCbG9vZCBQcmVzc3VyZSBUcmVuZCBSZXBvcnQKQGRlc2NyaXB0aW9uOiBSZXR1cm4gYmxvb2QgcHJlc3N1cmUgb2JzZXJ2YXRpb25zIGZvciBhIHBhdGllbnQgaW4gYSBkYXRlIHJhbmdlCkB2ZXJzaW9uOiAxLjAuMApAc3RhdHVzOiBhY3RpdmUKQGF1dGhvcjogQ2xpbmljYWwgSW5mb3JtYXRpY3MgVGVhbQpAcHVibGlzaGVyOiBSZWdpb25hbCBNZWRpY2FsIENlbnRlcgoqLwoKLS0gQHJlbGF0ZWREZXBlbmRlbmN5OiBodHRwczovL2V4YW1wbGUub3JnL1ZpZXdEZWZpbml0aW9uL3BhdGllbnRfdmlldyBhcyBwYXRpZW50X3ZpZXcKLS0gQHJlbGF0ZWREZXBlbmRlbmN5OiBodHRwczovL2V4YW1wbGUub3JnL1ZpZXdEZWZpbml0aW9uL2Jsb29kX3ByZXNzdXJlX3ZpZXcgYXMgYmxvb2RfcHJlc3N1cmVfdmlldwotLSBAcGFyYW06IHBhdGllbnRfaWQgc3RyaW5nIFBhdGllbnQgaWRlbnRpZmllcgotLSBAcGFyYW06IGZyb21fZGF0ZSBkYXRlIFN0YXJ0IGRhdGUgKGluY2x1c2l2ZSkKLS0gQHBhcmFtOiB0b19kYXRlIGRhdGUgRW5kIGRhdGUgKGluY2x1c2l2ZSkKU0VMRUNUCiAgcGF0aWVudF92aWV3LmlkIEFTIHBhdGllbnRfaWQsCiAgcGF0aWVudF92aWV3Lm5hbWUsCiAgYmxvb2RfcHJlc3N1cmVfdmlldy5zeXN0b2xpYywKICBibG9vZF9wcmVzc3VyZV92aWV3LmRpYXN0b2xpYywKICBibG9vZF9wcmVzc3VyZV92aWV3LmVmZmVjdGl2ZV9kYXRlCkZST00gcGF0aWVudF92aWV3CkpPSU4gYmxvb2RfcHJlc3N1cmVfdmlldwogIE9OIHBhdGllbnRfdmlldy5pZCA9IGJsb29kX3ByZXNzdXJlX3ZpZXcucGF0aWVudF9pZApXSEVSRSBwYXRpZW50X3ZpZXcuaWQgPSA6cGF0aWVudF9pZAogIEFORCBibG9vZF9wcmVzc3VyZV92aWV3LmVmZmVjdGl2ZV9kYXRlID49IDpmcm9tX2RhdGUKICBBTkQgYmxvb2RfcHJlc3N1cmVfdmlldy5lZmZlY3RpdmVfZGF0ZSA8PSA6dG9fZGF0ZQpPUkRFUiBCWSBibG9vZF9wcmVzc3VyZV92aWV3LmVmZmVjdGl2ZV9kYXRl"
+    }
+  ]
+}

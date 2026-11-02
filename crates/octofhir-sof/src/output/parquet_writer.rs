@@ -296,6 +296,139 @@ impl ParquetWriter {
     }
 }
 
+/// Rows a streamed Parquet file buffers before writing a row group.
+const STREAM_ROW_GROUP_ROWS: usize = 65_536;
+
+/// A byte sink the Arrow writer fills and the encoder drains.
+#[derive(Clone, Default)]
+struct SharedBuffer(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl SharedBuffer {
+    fn take(&self) -> Vec<u8> {
+        std::mem::take(
+            &mut *self
+                .0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        )
+    }
+}
+
+impl Write for SharedBuffer {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Encodes one Parquet file row by row, for streamed output: rows are
+/// buffered into row groups, and each call returns the bytes ready to be
+/// appended to the file (often none). The host does the I/O, as with
+/// [`super::RowEncoder`].
+pub struct ParquetStreamEncoder {
+    columns: Vec<ColumnInfo>,
+    temporal: TemporalEncoding,
+    writer: ArrowWriter<SharedBuffer>,
+    sink: SharedBuffer,
+    pending: Vec<Vec<Value>>,
+    rows: usize,
+}
+
+impl std::fmt::Debug for ParquetStreamEncoder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ParquetStreamEncoder")
+            .field("columns", &self.columns)
+            .field("rows", &self.rows)
+            .finish()
+    }
+}
+
+impl ParquetStreamEncoder {
+    /// An encoder for a file with these columns, as `settings` configures.
+    pub fn new(columns: Vec<ColumnInfo>, settings: &ParquetWriter) -> Result<Self> {
+        let schema = Arc::new(ParquetWriter::build_schema(&columns, settings.temporal));
+        let props = WriterProperties::builder()
+            .set_compression(settings.compression.into())
+            .build();
+        let sink = SharedBuffer::default();
+        let writer = ArrowWriter::try_new(sink.clone(), schema, Some(props))
+            .map_err(|e| Error::Output(format!("Failed to create Parquet writer: {e}")))?;
+        Ok(Self {
+            columns,
+            temporal: settings.temporal,
+            writer,
+            sink,
+            pending: Vec::new(),
+            rows: 0,
+        })
+    }
+
+    /// Rows encoded so far.
+    pub fn rows(&self) -> usize {
+        self.rows
+    }
+
+    /// The result columns.
+    pub fn columns(&self) -> &[ColumnInfo] {
+        &self.columns
+    }
+
+    /// One row, values in column order; the bytes ready to write.
+    pub fn row(&mut self, row: Vec<Value>) -> Result<Vec<u8>> {
+        self.pending.push(row);
+        self.rows += 1;
+        if self.pending.len() >= STREAM_ROW_GROUP_ROWS {
+            self.write_pending()?;
+            self.writer
+                .flush()
+                .map_err(|e| Error::Output(format!("Failed to write a row group: {e}")))?;
+        }
+        Ok(self.sink.take())
+    }
+
+    /// One row given as a JSON object (keys are column names).
+    pub fn row_json(&mut self, row: &str) -> Result<Vec<u8>> {
+        let object: serde_json::Map<String, Value> = serde_json::from_str(row)
+            .map_err(|e| Error::Output(format!("A row is not a JSON object: {e}")))?;
+        let values = self
+            .columns
+            .iter()
+            .map(|column| object.get(&column.name).cloned().unwrap_or(Value::Null))
+            .collect();
+        self.row(values)
+    }
+
+    /// The rest of the file: the last row group and the footer.
+    pub fn finish(mut self) -> Result<Vec<u8>> {
+        self.write_pending()?;
+        self.writer
+            .close()
+            .map_err(|e| Error::Output(format!("Failed to close Parquet writer: {e}")))?;
+        Ok(self.sink.take())
+    }
+
+    fn write_pending(&mut self) -> Result<()> {
+        if self.pending.is_empty() {
+            return Ok(());
+        }
+        let rows = std::mem::take(&mut self.pending);
+        let arrays = ParquetWriter::build_arrays(&self.columns, &rows, self.temporal)?;
+        let schema = Arc::new(ParquetWriter::build_schema(&self.columns, self.temporal));
+        let batch = RecordBatch::try_new(schema, arrays)
+            .map_err(|e| Error::Output(format!("Failed to create record batch: {e}")))?;
+        self.writer
+            .write(&batch)
+            .map_err(|e| Error::Output(format!("Failed to write record batch: {e}")))
+    }
+}
+
 /// Lenient FHIR temporal parsing for native Parquet output. This is a conversion
 /// policy, not FHIR validation; use text output to retain the original precision.
 mod temporal {
@@ -579,5 +712,31 @@ mod tests {
 
         assert!(output.len() > 4);
         assert_eq!(&output[0..4], b"PAR1");
+    }
+
+    #[test]
+    fn a_streamed_file_reads_back_like_a_buffered_one() {
+        use parquet::file::reader::{FileReader, SerializedFileReader};
+        let columns = vec![
+            ColumnInfo::new("id", ColumnType::String),
+            ColumnInfo::new("n", ColumnType::Integer),
+        ];
+        let mut encoder = ParquetStreamEncoder::new(columns, &ParquetWriter::new()).unwrap();
+        let mut bytes = Vec::new();
+        for i in 0..(STREAM_ROW_GROUP_ROWS + 10) {
+            bytes.extend(
+                encoder
+                    .row_json(&format!("{{\"id\":\"r{i}\",\"n\":{i}}}"))
+                    .unwrap(),
+            );
+        }
+        bytes.extend(encoder.finish().unwrap());
+        let reader = SerializedFileReader::new(bytes::Bytes::from(bytes)).unwrap();
+        let metadata = reader.metadata();
+        assert_eq!(
+            metadata.file_metadata().num_rows(),
+            (STREAM_ROW_GROUP_ROWS + 10) as i64
+        );
+        assert_eq!(metadata.num_row_groups(), 2);
     }
 }

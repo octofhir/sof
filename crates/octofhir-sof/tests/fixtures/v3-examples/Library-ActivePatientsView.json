@@ -1,0 +1,72 @@
+{
+  "resourceType": "Library",
+  "id": "ActivePatientsView",
+  "meta": {
+    "profile": [
+      "http://hl7.org/fhir/uv/sql-on-fhir/StructureDefinition/SQLView"
+    ]
+  },
+  "url": "http://hl7.org/fhir/uv/sql-on-fhir/Library/ActivePatientsView",
+  "identifier": [
+    {
+      "system": "urn:ietf:rfc:3986",
+      "value": "urn:oid:2.16.840.1.113883.4.642.40.77.28.2"
+    }
+  ],
+  "version": "3.0.0-ballot",
+  "name": "ActivePatientsView",
+  "title": "Active Patients",
+  "status": "active",
+  "type": {
+    "coding": [
+      {
+        "system": "http://hl7.org/fhir/uv/sql-on-fhir/CodeSystem/LibraryTypesCodes",
+        "code": "sql-view"
+      }
+    ]
+  },
+  "date": "2026-10-13T03:59:03+00:00",
+  "publisher": "HL7 International / FHIR Infrastructure",
+  "contact": [
+    {
+      "name": "HL7 International / FHIR Infrastructure",
+      "telecom": [
+        {
+          "system": "url",
+          "value": "http://www.hl7.org/Special/committees/fiwg"
+        }
+      ]
+    }
+  ],
+  "description": "Selects the identifier, name, and birth date of every active patient. Other\nqueries reference this view by its canonical URL and use the `active_patients`\nlabel as a table name.\n\n```sql\nSELECT\n  patient_view.id AS patient_id,\n  patient_view.name AS patient_name,\n  patient_view.birth_date\nFROM patient_view\nWHERE patient_view.active = true\n```",
+  "jurisdiction": [
+    {
+      "coding": [
+        {
+          "system": "http://unstats.un.org/unsd/methods/m49/m49.htm",
+          "code": "001",
+          "display": "World"
+        }
+      ]
+    }
+  ],
+  "relatedArtifact": [
+    {
+      "type": "depends-on",
+      "label": "patient_view",
+      "resource": "https://example.org/ViewDefinition/patient_view"
+    }
+  ],
+  "content": [
+    {
+      "extension": [
+        {
+          "url": "http://hl7.org/fhir/uv/sql-on-fhir/StructureDefinition/sql-text",
+          "valueString": "SELECT\n  patient_view.id AS patient_id,\n  patient_view.name AS patient_name,\n  patient_view.birth_date\nFROM patient_view\nWHERE patient_view.active = true"
+        }
+      ],
+      "contentType": "application/sql",
+      "data": "U0VMRUNUCiAgcGF0aWVudF92aWV3LmlkIEFTIHBhdGllbnRfaWQsCiAgcGF0aWVudF92aWV3Lm5hbWUgQVMgcGF0aWVudF9uYW1lLAogIHBhdGllbnRfdmlldy5iaXJ0aF9kYXRlCkZST00gcGF0aWVudF92aWV3CldIRVJFIHBhdGllbnRfdmlldy5hY3RpdmUgPSB0cnVl"
+    }
+  ]
+}

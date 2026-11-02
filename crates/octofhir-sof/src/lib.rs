@@ -60,7 +60,9 @@
 //!
 //! # SQL on FHIR Specification
 //!
-//! See: <https://build.fhir.org/ig/FHIR/sql-on-fhir-v2/>
+//! SQL on FHIR 3.0 (`hl7.fhir.uv.sql-on-fhir`, the HL7 continuous build of the
+//! 3.0.0 ballot): <https://build.fhir.org/ig/HL7/sql-on-fhir/>. Views written for
+//! 2.0 / 2.1 run unchanged.
 
 mod column;
 mod eval;

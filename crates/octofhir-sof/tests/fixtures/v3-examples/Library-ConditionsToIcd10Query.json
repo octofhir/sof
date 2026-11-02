@@ -1,0 +1,79 @@
+{
+  "resourceType": "Library",
+  "id": "ConditionsToIcd10Query",
+  "meta": {
+    "profile": [
+      "http://hl7.org/fhir/uv/sql-on-fhir/StructureDefinition/SQLQuery"
+    ]
+  },
+  "url": "http://hl7.org/fhir/uv/sql-on-fhir/Library/ConditionsToIcd10Query",
+  "identifier": [
+    {
+      "system": "urn:ietf:rfc:3986",
+      "value": "urn:oid:2.16.840.1.113883.4.642.40.77.28.8"
+    }
+  ],
+  "version": "3.0.0-ballot",
+  "name": "ConditionsToIcd10Query",
+  "title": "Conditions Translated to ICD-10",
+  "status": "active",
+  "type": {
+    "coding": [
+      {
+        "system": "http://hl7.org/fhir/uv/sql-on-fhir/CodeSystem/LibraryTypesCodes",
+        "code": "sql-query"
+      }
+    ]
+  },
+  "date": "2026-10-13T03:59:03+00:00",
+  "publisher": "HL7 International / FHIR Infrastructure",
+  "contact": [
+    {
+      "name": "HL7 International / FHIR Infrastructure",
+      "telecom": [
+        {
+          "system": "url",
+          "value": "http://www.hl7.org/Special/committees/fiwg"
+        }
+      ]
+    }
+  ],
+  "description": "Returns each condition with the ICD-10 code its SNOMED CT code maps to under\nthe `http://example.org/ConceptMap/sct-to-icd10|2026` concept map. The map is\ndeclared as a dependency and the runner exposes it under the `sct_to_icd10`\nlabel as a relation with the columns `source_system`, `source_version`,\n`source_code`, `source_display`, `target_system`, `target_version`,\n`target_code`, `target_display` and `relationship` (see\n[Terminology in SQL](terminology-in-sql.html#concept-map-relation)). The\n`LEFT JOIN` keeps conditions the map does not translate, with a null\n`target_code`; the `relationship` predicate excludes rows asserting that a\ntarget is not related to the source, and admits null so that a `noMap` row is\nkept.\n\n```sql\nSELECT conditions.patient_id,\n       conditions.code,\n       sct_to_icd10.target_code,\n       sct_to_icd10.relationship\nFROM conditions\nLEFT JOIN sct_to_icd10\n  ON sct_to_icd10.source_system = conditions.system\n AND sct_to_icd10.source_code = conditions.code\n AND (sct_to_icd10.relationship IS NULL\n      OR sct_to_icd10.relationship <> 'not-related-to')\n```",
+  "jurisdiction": [
+    {
+      "coding": [
+        {
+          "system": "http://unstats.un.org/unsd/methods/m49/m49.htm",
+          "code": "001",
+          "display": "World"
+        }
+      ]
+    }
+  ],
+  "relatedArtifact": [
+    {
+      "type": "depends-on",
+      "label": "conditions",
+      "display": "Condition view with patient_id, system, version and code columns",
+      "resource": "https://example.org/ViewDefinition/conditions"
+    },
+    {
+      "type": "depends-on",
+      "label": "sct_to_icd10",
+      "display": "SNOMED CT to ICD-10 concept map, exposed as a relation",
+      "resource": "http://example.org/ConceptMap/sct-to-icd10|2026"
+    }
+  ],
+  "content": [
+    {
+      "extension": [
+        {
+          "url": "http://hl7.org/fhir/uv/sql-on-fhir/StructureDefinition/sql-text",
+          "valueString": "SELECT conditions.patient_id,\n       conditions.code,\n       sct_to_icd10.target_code,\n       sct_to_icd10.relationship\nFROM conditions\nLEFT JOIN sct_to_icd10\n  ON sct_to_icd10.source_system = conditions.system\n AND sct_to_icd10.source_code = conditions.code\n AND (sct_to_icd10.relationship IS NULL\n      OR sct_to_icd10.relationship <> 'not-related-to')"
+        }
+      ],
+      "contentType": "application/sql",
+      "data": "U0VMRUNUIGNvbmRpdGlvbnMucGF0aWVudF9pZCwKICAgICAgIGNvbmRpdGlvbnMuY29kZSwKICAgICAgIHNjdF90b19pY2QxMC50YXJnZXRfY29kZSwKICAgICAgIHNjdF90b19pY2QxMC5yZWxhdGlvbnNoaXAKRlJPTSBjb25kaXRpb25zCkxFRlQgSk9JTiBzY3RfdG9faWNkMTAKICBPTiBzY3RfdG9faWNkMTAuc291cmNlX3N5c3RlbSA9IGNvbmRpdGlvbnMuc3lzdGVtCiBBTkQgc2N0X3RvX2ljZDEwLnNvdXJjZV9jb2RlID0gY29uZGl0aW9ucy5jb2RlCiBBTkQgKHNjdF90b19pY2QxMC5yZWxhdGlvbnNoaXAgSVMgTlVMTAogICAgICBPUiBzY3RfdG9faWNkMTAucmVsYXRpb25zaGlwIDw+ICdub3QtcmVsYXRlZC10bycp"
+    }
+  ]
+}

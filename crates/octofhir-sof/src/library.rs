@@ -317,6 +317,230 @@ pub fn bind_parameters(
     Ok(bound)
 }
 
+/// Canonical of the `sql-text` extension (the SQL in plain text on an
+/// `Attachment`).
+pub const SQL_TEXT_EXTENSION: &str =
+    "http://hl7.org/fhir/uv/sql-on-fhir/StructureDefinition/sql-text";
+
+/// Profiles a built Library claims.
+const SQL_QUERY_PROFILE: &str = "http://hl7.org/fhir/uv/sql-on-fhir/StructureDefinition/SQLQuery";
+const SQL_VIEW_PROFILE: &str = "http://hl7.org/fhir/uv/sql-on-fhir/StructureDefinition/SQLView";
+
+/// How [`build_annotated`] builds a Library.
+#[derive(Clone, Debug, Default)]
+pub struct AnnotatedOptions {
+    /// Build a SQLView rather than a SQLQuery.
+    pub view: bool,
+    /// The name to use when the SQL has no `@name` (e.g. the file name).
+    pub name: Option<String>,
+    /// `Library.url`, if any.
+    pub url: Option<String>,
+    /// The dialect of the SQL (`application/sql;dialect=…`); portable if
+    /// none.
+    pub dialect: Option<String>,
+}
+
+/// A Library built from annotated SQL, with what was not understood.
+#[derive(Clone, Debug)]
+pub struct AnnotatedLibrary {
+    pub library: Value,
+    /// Unrecognized annotations and similar notes.
+    pub warnings: Vec<String>,
+}
+
+/// Build a SQLQuery (or SQLView) Library from SQL carrying annotations in its
+/// comments (SQL on FHIR, SQLQuery "SQL Annotations"): `@name`, `@title`,
+/// `@description`, `@version`, `@status`, `@author`, `@publisher`,
+/// `@param: name type [description]` and
+/// `@relatedDependency: URL [as label]`, in block (`/* */`) and line (`--`)
+/// comments. The SQL goes into `content.data` (base64) and the `sql-text`
+/// extension; the name falls back to `options.name`, the status to `draft`;
+/// parameter types and labels are checked, and the result is read back as a
+/// [`SqlLibrary`] so it conforms.
+pub fn build_annotated(sql: &str, options: &AnnotatedOptions) -> Result<AnnotatedLibrary> {
+    let invalid = |message: String| Error::InvalidLibrary(message);
+    let mut warnings = Vec::new();
+    let mut library = serde_json::Map::new();
+    library.insert("resourceType".into(), Value::from("Library"));
+    library.insert(
+        "meta".into(),
+        serde_json::json!({"profile": [if options.view { SQL_VIEW_PROFILE } else { SQL_QUERY_PROFILE }]}),
+    );
+    if let Some(url) = &options.url {
+        library.insert("url".into(), Value::from(url.as_str()));
+    }
+    let mut authors = Vec::new();
+    let mut parameters = Vec::new();
+    let mut dependencies = Vec::new();
+    for comment in comments(sql) {
+        for line in comment.lines() {
+            let line = line.trim().trim_start_matches('*').trim();
+            let Some(annotation) = line.strip_prefix('@') else {
+                continue;
+            };
+            let Some((key, value)) = annotation.split_once(':') else {
+                warnings.push(format!("annotation @{annotation} has no value"));
+                continue;
+            };
+            let (key, value) = (key.trim(), value.trim());
+            match key {
+                "name" | "title" | "description" | "version" | "status" | "publisher" => {
+                    library.insert(key.into(), Value::from(value));
+                }
+                "author" => authors.push(serde_json::json!({"name": value})),
+                "param" => {
+                    let mut words = value.splitn(3, char::is_whitespace);
+                    let (Some(name), Some(fhir_type)) = (words.next(), words.next()) else {
+                        return Err(invalid(format!("@param {value:?} needs a name and a type")));
+                    };
+                    let declared = DeclaredParameter {
+                        name: name.to_owned(),
+                        fhir_type: fhir_type.to_owned(),
+                        required: false,
+                    };
+                    if !is_sql_name(name) {
+                        return Err(invalid(format!(
+                            "@param name {name:?} is not a SQL identifier"
+                        )));
+                    }
+                    if declared.sql_type().is_none() {
+                        return Err(invalid(format!(
+                            "@param {name} has type {fhir_type}, which has no SQL value"
+                        )));
+                    }
+                    let mut parameter =
+                        serde_json::json!({"name": name, "use": "in", "type": fhir_type});
+                    if let Some(documentation) =
+                        words.next().map(str::trim).filter(|text| !text.is_empty())
+                    {
+                        parameter["documentation"] = Value::from(documentation);
+                    }
+                    parameters.push(parameter);
+                }
+                "relatedDependency" => {
+                    let (canonical, label) = match value.split_once(" as ") {
+                        Some((canonical, label)) => (canonical.trim(), label.trim().to_owned()),
+                        None => (value, default_label(value)),
+                    };
+                    if !is_sql_name(&label) {
+                        return Err(invalid(format!(
+                            "@relatedDependency label {label:?} is not a SQL identifier"
+                        )));
+                    }
+                    dependencies.push(serde_json::json!({
+                        "type": "depends-on", "resource": canonical, "label": label
+                    }));
+                }
+                other => warnings.push(format!("unrecognized annotation @{other}")),
+            }
+        }
+    }
+    if !library.contains_key("name")
+        && let Some(name) = &options.name
+    {
+        library.insert("name".into(), Value::from(name.as_str()));
+    }
+    library
+        .entry("status")
+        .or_insert_with(|| Value::from("draft"));
+    if !authors.is_empty() {
+        library.insert("author".into(), Value::Array(authors));
+    }
+    library.insert(
+        "type".into(),
+        serde_json::json!({"coding": [{
+            "system": LIBRARY_TYPES,
+            "code": if options.view { "sql-view" } else { "sql-query" }
+        }]}),
+    );
+    if !parameters.is_empty() {
+        library.insert("parameter".into(), Value::Array(parameters));
+    }
+    if !dependencies.is_empty() {
+        library.insert("relatedArtifact".into(), Value::Array(dependencies));
+    }
+    let content_type = match &options.dialect {
+        Some(dialect) => format!("application/sql;dialect={dialect}"),
+        None => "application/sql".to_owned(),
+    };
+    library.insert(
+        "content".into(),
+        serde_json::json!([{
+            "contentType": content_type,
+            "data": STANDARD.encode(sql),
+            "extension": [{"url": SQL_TEXT_EXTENSION, "valueString": sql}]
+        }]),
+    );
+    let library = Value::Object(library);
+    SqlLibrary::from_json(&library, options.dialect.as_deref().unwrap_or("postgresql"))?;
+    Ok(AnnotatedLibrary { library, warnings })
+}
+
+/// A dependency label from its canonical: the last path segment, as a SQL
+/// identifier.
+fn default_label(canonical: &str) -> String {
+    let url = canonical.split('|').next().unwrap_or(canonical);
+    let segment = url.trim_end_matches('/').rsplit('/').next().unwrap_or(url);
+    let mut label: String = segment
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if !label.starts_with(|c: char| c.is_ascii_alphabetic()) {
+        label.insert(0, 't');
+    }
+    label
+}
+
+/// The texts of the comments of `sql` (block and line), outside string
+/// literals and quoted identifiers.
+fn comments(sql: &str) -> Vec<String> {
+    let chars: Vec<char> = sql.chars().collect();
+    let mut found = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        match chars[i] {
+            quote @ ('\'' | '"') => {
+                i += 1;
+                while i < chars.len() {
+                    if chars[i] == quote {
+                        if chars.get(i + 1) == Some(&quote) {
+                            i += 2;
+                            continue;
+                        }
+                        break;
+                    }
+                    i += 1;
+                }
+                i += 1;
+            }
+            '-' if chars.get(i + 1) == Some(&'-') => {
+                let start = i + 2;
+                let end = (start..chars.len())
+                    .find(|&j| chars[j] == '\n')
+                    .unwrap_or(chars.len());
+                found.push(chars[start..end].iter().collect());
+                i = end;
+            }
+            '/' if chars.get(i + 1) == Some(&'*') => {
+                let start = i + 2;
+                let end = (start..chars.len().saturating_sub(1))
+                    .find(|&j| chars[j] == '*' && chars[j + 1] == '/')
+                    .unwrap_or(chars.len());
+                found.push(chars[start..end.min(chars.len())].iter().collect());
+                i = end + 2;
+            }
+            _ => i += 1,
+        }
+    }
+    found
+}
+
 /// `sql-name`: `^[A-Za-z][A-Za-z0-9_]*$`.
 fn is_sql_name(name: &str) -> bool {
     let mut chars = name.chars();
@@ -488,5 +712,60 @@ mod tests {
                 "{values}"
             );
         }
+    }
+
+    #[test]
+    fn annotated_sql_builds_a_conforming_query() {
+        let sql = "/*\n@name: PatientBloodPressure\n@title: Patient Blood Pressure Report\n@version: 1.0.0\n@status: active\n@colour: blue\n*/\n-- @param: patient_id string Patient identifier\n-- @param: from_date date Start date\n-- @relatedDependency: https://example.org/ViewDefinition/patient_view as patient\n-- @relatedDependency: https://example.org/ViewDefinition/bp_view|2\nSELECT patient.id, bp_view.systolic, '-- @name: not a comment'\nFROM patient JOIN bp_view ON patient.id = bp_view.patient_id\nWHERE patient.id = :patient_id AND bp_view.effective_date >= :from_date";
+        let built = build_annotated(sql, &AnnotatedOptions::default()).unwrap();
+        let library = &built.library;
+        assert_eq!(library["name"], "PatientBloodPressure");
+        assert_eq!(library["status"], "active");
+        assert_eq!(library["type"]["coding"][0]["code"], "sql-query");
+        assert_eq!(library["parameter"][1]["type"], "date");
+        assert_eq!(
+            library["parameter"][0]["documentation"],
+            "Patient identifier"
+        );
+        assert_eq!(library["relatedArtifact"][1]["label"], "bp_view");
+        assert_eq!(library["content"][0]["extension"][0]["valueString"], sql);
+        assert_eq!(built.warnings, ["unrecognized annotation @colour"]);
+        let parsed = SqlLibrary::from_json(library, "postgresql").unwrap();
+        assert_eq!(parsed.dependencies.len(), 2);
+
+        let view = build_annotated(
+            "-- @relatedDependency: http://x/ViewDefinition/p as p\nSELECT * FROM p",
+            &AnnotatedOptions {
+                view: true,
+                name: Some("ActivePatients".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(view.library["name"], "ActivePatients");
+        assert_eq!(view.library["status"], "draft");
+        assert_eq!(view.library["type"]["coding"][0]["code"], "sql-view");
+
+        for bad in [
+            "-- @param: x widget\nSELECT 1",
+            "-- @relatedDependency: http://x/v as 1st\nSELECT 1",
+            "-- @param: x\nSELECT 1",
+        ] {
+            assert!(
+                build_annotated(bad, &AnnotatedOptions::default()).is_err(),
+                "{bad}"
+            );
+        }
+        // A SQLView declares no parameters.
+        assert!(
+            build_annotated(
+                "-- @param: x string\nSELECT 1",
+                &AnnotatedOptions {
+                    view: true,
+                    ..Default::default()
+                }
+            )
+            .is_err()
+        );
     }
 }

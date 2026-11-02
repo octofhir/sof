@@ -100,6 +100,7 @@ impl SqlGenerator {
     /// referenced constant is undefined, or if the view's column shape is
     /// inconsistent across `unionAll` branches.
     pub fn generate(&self, view: &ViewDefinition) -> Result<GeneratedSql, Error> {
+        view.validate()?;
         if view.resource.trim().is_empty() {
             return Err(Error::InvalidViewDefinition(
                 "ViewDefinition is missing the required `resource`".to_string(),
@@ -331,14 +332,14 @@ mod tests {
 
     #[test]
     fn union_shape_mismatch_errors() {
-        let v = ViewDefinition::from_json(&json!({
+        let mismatched = json!({
             "resource": "Patient",
             "select": [{ "unionAll": [
                 { "column": [{ "name": "a", "path": "id" }, { "name": "b", "path": "id" }] },
                 { "column": [{ "name": "a", "path": "id" }, { "name": "c", "path": "id" }] }
             ] }]
-        }))
-        .unwrap();
+        });
+        let v: ViewDefinition = serde_json::from_value(mismatched).unwrap();
         assert!(SqlGenerator::new().generate(&v).is_err());
     }
 

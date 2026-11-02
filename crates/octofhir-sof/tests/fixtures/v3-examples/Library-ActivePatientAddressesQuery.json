@@ -1,0 +1,79 @@
+{
+  "resourceType": "Library",
+  "id": "ActivePatientAddressesQuery",
+  "meta": {
+    "profile": [
+      "http://hl7.org/fhir/uv/sql-on-fhir/StructureDefinition/SQLQuery"
+    ]
+  },
+  "url": "http://hl7.org/fhir/uv/sql-on-fhir/Library/ActivePatientAddressesQuery",
+  "identifier": [
+    {
+      "system": "urn:ietf:rfc:3986",
+      "value": "urn:oid:2.16.840.1.113883.4.642.40.77.28.1"
+    }
+  ],
+  "version": "3.0.0-ballot",
+  "name": "ActivePatientAddressesQuery",
+  "title": "Active Patient Addresses",
+  "status": "active",
+  "type": {
+    "coding": [
+      {
+        "system": "http://hl7.org/fhir/uv/sql-on-fhir/CodeSystem/LibraryTypesCodes",
+        "code": "sql-query"
+      }
+    ]
+  },
+  "date": "2026-10-13T03:59:03+00:00",
+  "publisher": "HL7 International / FHIR Infrastructure",
+  "contact": [
+    {
+      "name": "HL7 International / FHIR Infrastructure",
+      "telecom": [
+        {
+          "system": "url",
+          "value": "http://www.hl7.org/Special/committees/fiwg"
+        }
+      ]
+    }
+  ],
+  "description": "Joins the [Active Patients](Library-ActivePatientsView.html) view to patient\naddresses. The `active_patients` label resolves to the referenced SQLView, which\nthe executing engine may materialize or inline.\n\n```sql\nSELECT\n  active_patients.patient_id,\n  active_patients.patient_name,\n  patient_address_view.city,\n  patient_address_view.state\nFROM active_patients\nJOIN patient_address_view\n  ON active_patients.patient_id = patient_address_view.patient_id\n```",
+  "jurisdiction": [
+    {
+      "coding": [
+        {
+          "system": "http://unstats.un.org/unsd/methods/m49/m49.htm",
+          "code": "001",
+          "display": "World"
+        }
+      ]
+    }
+  ],
+  "relatedArtifact": [
+    {
+      "type": "depends-on",
+      "label": "active_patients",
+      "display": "Active Patients view",
+      "resource": "http://hl7.org/fhir/uv/sql-on-fhir/Library/ActivePatientsView"
+    },
+    {
+      "type": "depends-on",
+      "label": "patient_address_view",
+      "display": "Patient address view",
+      "resource": "https://example.org/ViewDefinition/patient_address_view"
+    }
+  ],
+  "content": [
+    {
+      "extension": [
+        {
+          "url": "http://hl7.org/fhir/uv/sql-on-fhir/StructureDefinition/sql-text",
+          "valueString": "SELECT\n  active_patients.patient_id,\n  active_patients.patient_name,\n  patient_address_view.city,\n  patient_address_view.state\nFROM active_patients\nJOIN patient_address_view\n  ON active_patients.patient_id = patient_address_view.patient_id"
+        }
+      ],
+      "contentType": "application/sql",
+      "data": "U0VMRUNUCiAgYWN0aXZlX3BhdGllbnRzLnBhdGllbnRfaWQsCiAgYWN0aXZlX3BhdGllbnRzLnBhdGllbnRfbmFtZSwKICBwYXRpZW50X2FkZHJlc3Nfdmlldy5jaXR5LAogIHBhdGllbnRfYWRkcmVzc192aWV3LnN0YXRlCkZST00gYWN0aXZlX3BhdGllbnRzCkpPSU4gcGF0aWVudF9hZGRyZXNzX3ZpZXcKICBPTiBhY3RpdmVfcGF0aWVudHMucGF0aWVudF9pZCA9IHBhdGllbnRfYWRkcmVzc192aWV3LnBhdGllbnRfaWQ="
+    }
+  ]
+}
