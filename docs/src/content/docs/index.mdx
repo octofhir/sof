@@ -1,6 +1,6 @@
 ---
 title: octofhir-sof
-description: A pure-Rust SQL on FHIR v2 engine — in-memory evaluation over JSON and multi-dialect SQL generation.
+description: A pure-Rust SQL on FHIR 3.0 engine — in-memory evaluation over JSON, multi-dialect SQL generation, and SQLQuery jobs with terminology.
 template: splash
 hero:
   tagline: Turn FHIR data into flat tables from a ViewDefinition — with no database required, or by generating PostgreSQL / DuckDB SQL.
@@ -29,6 +29,10 @@ import { Card, CardGrid } from '@astrojs/starlight/components';
     One dialect-parametrized generator emits PostgreSQL JSONB or DuckDB JSON
     `SELECT`s, plus `CREATE TABLE` DDL in ansi / postgres / duckdb.
   </Card>
+  <Card title="SQL on FHIR 3.0 jobs" icon="star">
+    SQLQuery / SQLView libraries, the dependency graph of `$sql-run` and
+    `$sql-export`, value sets and concept maps as tables — host-independent.
+  </Card>
   <Card title="Offline lint & validate" icon="puzzle">
     Rustc-style diagnostics for ViewDefinitions (FH01–FH11), plus JSON and
     SARIF 2.1.0 output for CI — schema-driven against any FHIR package.
@@ -38,9 +42,12 @@ import { Card, CardGrid } from '@astrojs/starlight/components';
 ## What it is
 
 `octofhir-sof` is a Rust toolkit for
-[SQL on FHIR v2](https://build.fhir.org/ig/FHIR/sql-on-fhir-v2/): it parses
-`ViewDefinition` resources and turns FHIR data into flat tables. The library is
-network-free and embeddable; the CLI is a thin shell over it.
+[SQL on FHIR 3.0](https://build.fhir.org/ig/HL7/sql-on-fhir/)
+(`hl7.fhir.uv.sql-on-fhir`, the HL7 continuous build of the 3.0.0 ballot): it
+parses `ViewDefinition` resources and turns FHIR data into flat tables, and it
+carries the SQL layer 3.0 adds on top — SQLQuery / SQLView libraries over
+views, value sets and concept maps. Views written for 2.0 / 2.1 run unchanged.
+The library is network-free and embeddable; the CLI is a thin shell over it.
 
 - **Database-free in-memory evaluator** over `serde_json`, and a **PostgreSQL /
   DuckDB SQL generator** — both pass the full official content-test suite
@@ -48,8 +55,10 @@ network-free and embeddable; the CLI is a thin shell over it.
 - **Version-agnostic execution**: the engine navigates resource JSON directly,
   so the same view runs unchanged over R4, R4B, R5 or R6.
 - **Writers**: CSV, NDJSON, JSON, and Parquet (feature-gated).
-- **Full v2.1 support**: the `repeat` directive and the `%rowIndex` environment
-  variable, on both paths.
+- **The 3.0 view model**: `repeat` and `%rowIndex` on both paths, and the
+  structural rules checked before a view runs.
+- **The 3.0 SQL layer**: see [SQL on FHIR 3.0 jobs](/sof/guides/sql-on-fhir-3/).
+- Every example of the 3.0 guide is part of the test suite.
 
 ## Install
 

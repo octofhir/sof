@@ -1,6 +1,6 @@
-<p align="center"><img src=".github/banner.png" alt="octo/sof — SQL on FHIR v2, with or without a database" width="100%"></p>
+<p align="center"><img src=".github/banner.png" alt="octo/sof — SQL on FHIR v3, with or without a database" width="100%"></p>
 
-<p align="center"><b>SQL on FHIR v2 for Rust: run ViewDefinitions in memory, or generate PostgreSQL and DuckDB SQL.</b></p>
+<p align="center"><b>SQL on FHIR v3 for Rust: run ViewDefinitions in memory or as PostgreSQL and DuckDB SQL, and build SQLQuery jobs with terminology on top.</b></p>
 
 <p align="center">
   <a href="https://github.com/octofhir/sof/actions/workflows/ci.yml"><img src="https://github.com/octofhir/sof/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
@@ -9,9 +9,12 @@
   <a href="#license"><img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg" alt="License: MIT OR Apache-2.0"></a>
 </p>
 
-A Rust toolkit for [SQL on FHIR v2](https://build.fhir.org/ig/FHIR/sql-on-fhir-v2/):
+A Rust toolkit for [SQL on FHIR 3.0](https://build.fhir.org/ig/HL7/sql-on-fhir/)
+(`hl7.fhir.uv.sql-on-fhir`, the HL7 continuous build of the 3.0.0 ballot):
 parse `ViewDefinition` resources and turn FHIR data into flat tables — with no
-database required, or by generating SQL.
+database required, or by generating SQL — and run the SQL layer 3.0 adds on
+top: SQLQuery / SQLView libraries over views, value sets and concept maps.
+Views written for 2.0 / 2.1 run unchanged (3.0 kept the view semantics).
 
 **Documentation:** <https://octofhir.github.io/sof>
 
@@ -23,8 +26,23 @@ database required, or by generating SQL.
   native temporal types for analytics.
 - **Offline lint & validation** of ViewDefinitions (FH01–FH10) with rustc-style
   diagnostics, plus JSON and SARIF output for CI.
-- Full support for the v2.1 additions: the `repeat` directive and the
-  `%rowIndex` environment variable, on both paths.
+- The view model of 3.0: `repeat` and `%rowIndex` on both paths, and the
+  structural rules checked before a view runs (SQL names, one iteration
+  directive per select, `unionAll` branches with the same columns and types).
+- **The SQL layer of 3.0**, host-independent (no database, network or clock;
+  a server, a CLI or an embedded engine plugs in where artifacts come from):
+  - `library` — SQLQuery / SQLView Libraries: the SQL of a dialect, the
+    dependencies, parameter binding, and a builder from annotated SQL
+    (`@param`, `@relatedDependency`, ...);
+  - `plan` — the dependency graph of a `$sql-run` / `$sql-export` job: one
+    resolution per canonical, `context` matching, cycles, CTE order;
+  - `relations` and `expansion` — Terminology in SQL: ValueSet and ConceptMap
+    dependencies as tables, and a strict ValueSet expander that says what it
+    cannot determine instead of leaving it out;
+  - `output::RowEncoder` and `ParquetStreamEncoder` — rows streamed to ndjson,
+    csv, json or Parquet files without holding the result.
+- Every example of the 3.0 guide (views and libraries) is part of the test
+  suite.
 
 ## Install
 
@@ -150,6 +168,27 @@ duckdb -c "DESCRIBE SELECT * FROM read_parquet('temporal.parquet');"
 duckdb -c "SELECT birth_date, date_part('year', birth_date) FROM read_parquet('temporal.parquet');"
 ```
 
+### SQL on FHIR 3.0 jobs
+
+A host resolves a SQLQuery's dependencies with its own lookups and runs the
+SQL where it likes; the graph, the relations and the encoding are the
+library's:
+
+```rust
+use octofhir_sof::library::{SqlLibrary, bind_parameters};
+use octofhir_sof::plan::{ContextArtifacts, Resolver, closure};
+
+let query = SqlLibrary::from_json(&library_json, "postgresql")?;
+let values = bind_parameters(&query, Some(&parameters_json))?;
+let context = ContextArtifacts::from_parameters(&request_json)?;
+let mut resolver = Resolver::new(&my_artifact_source, &context, "postgresql");
+let edges = resolver.subject(&query).await?;
+let job = resolver.finish()?; // views, SQLViews, value set / concept map rows
+for (label, artifact) in closure(&job, &edges)? {
+    // materialize job.artifacts[artifact] as `label`, then run query.sql
+}
+```
+
 ## SQL dialects
 
 `generate` emits a PostgreSQL JSONB query by default and a DuckDB JSON query
@@ -172,7 +211,8 @@ version.
 The official reference tests from
 [FHIR/sql-on-fhir.js](https://github.com/FHIR/sql-on-fhir.js) are vendored under
 `crates/octofhir-sof/tests/spec/` (refresh with `just update-spec-tests`). Both
-execution paths pass the full v2.1 suite (144/144). Run them:
+execution paths pass the full suite (144/144); the examples of the 3.0 guide
+(`tests/fixtures/v3-examples`) read, validate and compile. Run them:
 
 ```sh
 just conformance                 # in-memory (no database)

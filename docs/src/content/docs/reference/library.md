@@ -105,6 +105,19 @@ warnings to stderr.
 The core library does not depend on `reqwest`, with or without Parquet. The lint
 crate still includes HTTP dependencies for schema/package providers.
 
+### SQL on FHIR 3.0 jobs
+
+| Module | What it gives a host |
+|---|---|
+| `library` | `SqlLibrary::from_json(library, dialect)`, `bind_parameters`, `build_annotated` (a Library from annotated SQL) |
+| `plan` | `ContextArtifacts`, `Resolver` over an `ArtifactSource`, `ResolvedJob` (serde), `closure` (CTE order) |
+| `relations` | `value_set_rows`, `concept_map_rows`, the relation columns, provenance records |
+| `expansion` | `Expander` over a `TerminologySource`, `ExpansionStamp`, `ExpansionError` |
+| `output` | `RowEncoder` / `RowFormat`; `ParquetStreamEncoder` (feature `parquet`) |
+| `Dialect::value_type` | the column type generated SQL gives a view column, for tables a host fills itself |
+
+See [SQL on FHIR 3.0 jobs](/sof/guides/sql-on-fhir-3/).
+
 ## `octofhir-sof-lint`
 
 ```rust

@@ -10,7 +10,7 @@ it. They are reported by `octofhir-sof validate` (structural rules) and
 its rule page via its `help_url`.
 
 The rules cite the
-[SQL on FHIR v2 specification](https://build.fhir.org/ig/FHIR/sql-on-fhir-v2/)
+[SQL on FHIR specification](https://build.fhir.org/ig/HL7/sql-on-fhir/)
 where relevant.
 
 ## Selector rules (need `lint --package`)

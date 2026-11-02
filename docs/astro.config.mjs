@@ -11,7 +11,7 @@ export default defineConfig({
     starlight({
       title: 'octofhir-sof',
       description:
-        'A pure-Rust SQL on FHIR v2 engine: database-free in-memory evaluation and multi-dialect SQL generation.',
+        'A pure-Rust SQL on FHIR 3.0 engine: database-free in-memory evaluation, multi-dialect SQL generation, and SQLQuery jobs with terminology.',
       social: [
         { icon: 'github', label: 'GitHub', href: 'https://github.com/octofhir/sof' },
       ],

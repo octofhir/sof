@@ -1,12 +1,12 @@
 ---
 title: Conformance
-description: 144/144 on both execution paths against the official SQL-on-FHIR v2.1 suite.
+description: 144/144 on both execution paths against the official SQL on FHIR suite, plus every example of the 3.0 guide.
 sidebar:
   order: 4
 ---
 
-`octofhir-sof` runs the official
-[FHIR/sql-on-fhir.js](https://github.com/FHIR/sql-on-fhir.js) v2.1 content-test
+`octofhir-sof` targets SQL on FHIR 3.0 and runs the official
+[FHIR/sql-on-fhir.js](https://github.com/FHIR/sql-on-fhir.js) content-test
 suite (vendored under `crates/octofhir-sof/tests/spec/`). **Both** execution
 paths — the database-free in-memory evaluator and the generated PostgreSQL —
 pass the full suite:
@@ -16,6 +16,10 @@ TOTAL  144/144
 ```
 
 The DuckDB SQL path is additionally verified through the `duckdb` CLI.
+
+The 3.0 guide's examples (`tests/fixtures/v3-examples`) are tests as well:
+every SQLQuery and SQLView Library reads in both dialects, and every
+ViewDefinition passes the 3.0 structural rules, compiles and lowers to SQL.
 
 ## Running the suite
 
