@@ -1,7 +1,7 @@
 # Vendored SQL-on-FHIR v2 content tests
 
 Source: https://github.com/FHIR/sql-on-fhir.js
-Commit: 050ca8174e5d451915240acead98fc7ec2e2031a
+Commit: 238d9b2be4ad0d66f9b5a9e640f6337f85b7904c
 Vendored: 2026-06-04
 License: see upstream (Apache-2.0 / CC0)
 
