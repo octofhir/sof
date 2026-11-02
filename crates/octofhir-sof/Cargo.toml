@@ -24,6 +24,10 @@ octofhir-fhir-model = { workspace = true }
 sqlx-core = { workspace = true, optional = true }
 sqlx-postgres = { workspace = true, optional = true }
 
+# SQLQuery content (base64) and terminology filters (regex)
+base64 = { workspace = true }
+regex = { workspace = true }
+
 # Serialization
 serde = { workspace = true }
 serde_json = { workspace = true }

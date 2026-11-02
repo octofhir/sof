@@ -16,6 +16,14 @@
 //! - [`CompiledView`] / [`execute`] - Database-free in-memory evaluation
 //! - [`SqlExecutor`] / [`run_with`] - Run generated SQL through any database layer
 //! - `ViewRunner` - Executes views against PostgreSQL (feature `postgres`)
+//! - [`library`] - SQLQuery / SQLView Libraries (v3): SQL by dialect,
+//!   dependencies, parameter binding
+//! - [`plan`] - the dependency graph of a `$sql-run` / `$sql-export` job:
+//!   one resolution per canonical, `context` matching, CTE order
+//! - [`relations`] / [`expansion`] - Terminology in SQL: ValueSet and
+//!   ConceptMap relations, a strict ValueSet expander
+//! - [`output::RowEncoder`] - row-at-a-time ndjson / csv / json for streamed
+//!   exports
 //!
 //! # Cargo features
 //!
@@ -56,7 +64,11 @@
 
 mod column;
 mod eval;
+pub mod expansion;
+pub mod library;
 pub mod output;
+pub mod plan;
+pub mod relations;
 mod runner;
 mod sql_generator;
 mod view_definition;
@@ -109,6 +121,14 @@ pub enum Error {
     /// An error occurred while generating output.
     #[error("Output error: {0}")]
     Output(String),
+
+    /// A Library does not conform to the SQLQuery / SQLView profile.
+    #[error("Invalid Library: {0}")]
+    InvalidLibrary(String),
+
+    /// A parameter value does not bind to the Library's declarations.
+    #[error("Invalid parameter: {0}")]
+    InvalidParameter(String),
 
     /// JSON serialization/deserialization error.
     #[error("JSON error: {0}")]

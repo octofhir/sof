@@ -10,9 +10,11 @@
 
 mod csv;
 mod ndjson;
+mod rows;
 
 pub use csv::CsvWriter;
 pub use ndjson::{JsonArrayWriter, NdjsonWriter};
+pub use rows::{RowEncoder, RowFormat};
 
 #[cfg(feature = "parquet")]
 mod parquet_writer;
