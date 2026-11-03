@@ -4,6 +4,54 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.3.3] — 2026-11-03
+
+### Added
+
+- `catalog`: dependencies from files — `Catalog` indexes ViewDefinitions,
+  Libraries, ValueSets, CodeSystems and ConceptMaps from JSON / NDJSON files,
+  Bundles, directories and FHIR packages (`.index.json` skips other files;
+  `.tgz` with the new `packages` feature), recording each origin; a
+  versionless canonical takes the latest version (`compare_versions`:
+  `versionAlgorithm[x]`, else natural order, pre-releases first), two
+  different resources with it are ambiguous. `CatalogSource` is the job's
+  `ArtifactSource` over it; `value_set_content` is the rule hosts share (the
+  artifact's expansion, else the strict expander, else a terminology server).
+- A terminology server for SQL jobs is the ecosystem's `TerminologyProvider`
+  (octofhir-fhir-model 0.1.18, `HttpTerminologyProvider` with `tx-remote`),
+  the same provider `memberOf()` in views uses: value sets a host lacks, or
+  cannot expand, expanded by canonical through the strict
+  `expand_valueset_resource`; `with_remote_definitions` also sends a
+  definition the server does not know (opt-in).
+- `embedded::DuckDbJob` (feature `duckdb`, bundled DuckDB 1.5): whole
+  SQLQuery jobs with no server — views evaluated in memory into typed tables,
+  terminology relations, SQLViews as CTEs, parameters bound positionally; a
+  sandbox (`enable_external_access = false`, locked configuration);
+  `describe` checks a query without data.
+- `guard` (feature `guard`): the static check of SQL run on a shared
+  PostgreSQL (one `SELECT` over the declared labels and its CTEs, allowlisted
+  functions, `:name` → `$n::type`), moved here from the OctoFHIR server.
+- `library::positional_parameters`, `DeclaredParameter::sql_type_in`,
+  `ContextArtifacts::from_resources`, `ExpansionStamp::now`,
+  `ColumnType::fhir_type`.
+- CLI `octofhir-sof sql build | check | run | export`, with `--artifacts`,
+  `--context`, `--param`, `--parameters`, `--tx`, `--tx-definitions`,
+  `--provenance`; `examples/sql` runs the libraries of the 3.0 guide.
+
+### Changed
+
+- Temporal parameters (`date`, `dateTime`, `instant`, `time`) bind as text in
+  their FHIR form, validated, as the temporal columns of a view are, so the
+  guide's `bp.effective_date >= :from_date` compares like with like (it was a
+  type error on PostgreSQL and DuckDB).
+- An expansion marked `valueset-unclosed` (as terminology servers mark SNOMED
+  CT expansions) is taken when its `total` shows every member listed, and the
+  provenance records `unclosed`; Terminology in SQL defines incomplete as an
+  `offset` or a `total` above the entries.
+- The library needs only tokio's `rt` and `io-util` (with octofhir-fhirpath
+  0.5.3, which needs only `sync`).
+- Dependencies: octofhir-fhirpath 0.5.3, octofhir-fhir-model 0.1.18.
+
 ## [0.3.2] — 2026-11-03
 
 ### Changed
