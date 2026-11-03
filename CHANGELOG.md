@@ -4,6 +4,14 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.3.2] — 2026-11-03
+
+### Changed
+
+- Dependencies: octofhir-fhirpath 0.5.2, octofhir-fhirschema 0.3.34,
+  octofhir-canonical-manager 0.2.8 (a pinned `url|version` resolves to that
+  version).
+
 ## [0.3.1] — 2026-11-03
 
 ### Added

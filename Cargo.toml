@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.3.1"
+version = "0.3.2"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/octofhir/sof"
@@ -13,13 +13,13 @@ authors = ["OctoFHIR Team <funyloony@gmail.com>"]
 [workspace.dependencies]
 # Internal (version is required so dependent crates carry a real requirement
 # when published to crates.io; keep in sync with workspace.package.version)
-octofhir-sof = { path = "crates/octofhir-sof", version = "0.3.1" }
-octofhir-sof-lint = { path = "crates/octofhir-sof-lint", version = "0.3.1" }
+octofhir-sof = { path = "crates/octofhir-sof", version = "0.3.2" }
+octofhir-sof-lint = { path = "crates/octofhir-sof-lint", version = "0.3.2" }
 
 # Ecosystem (crates.io)
-octofhir-fhirpath = { version = "0.5.1", default-features = false }
-octofhir-fhirschema = "0.3.33"
-octofhir-canonical-manager = "0.2.4"
+octofhir-fhirpath = { version = "0.5.2", default-features = false }
+octofhir-fhirschema = "0.3.34"
+octofhir-canonical-manager = "0.2.8"
 # TerminologyProvider trait (memberOf/subsumes/translate in views). The HTTP
 # provider sits behind its `http-client` feature, enabled only by `tx-remote`.
 octofhir-fhir-model = { version = "0.1.17", default-features = false }

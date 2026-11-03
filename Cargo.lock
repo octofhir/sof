@@ -1860,6 +1860,8 @@ checksum = "cc4e190f5d26ca7051642629da2c52fc03bde85a03197c99408dcd291734c855"
 dependencies = [
  "equivalent",
  "hashbrown 0.17.1",
+ "serde",
+ "serde_core",
 ]
 
 [[package]]
@@ -2297,9 +2299,9 @@ dependencies = [
 
 [[package]]
 name = "octofhir-canonical-manager"
-version = "0.2.6"
+version = "0.2.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0e9d97671ee093f048011296b47b28e505ef96d38a5c1d7c8d9cc9708c0d37f4"
+checksum = "15ff47b4b66321a26f5394384e1abebe3813be4cdb3199630aef38d5907f1588"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2365,9 +2367,9 @@ dependencies = [
 
 [[package]]
 name = "octofhir-fhirpath"
-version = "0.5.1"
+version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fd8069b1116f99139edcdcecce4550a5db4d47b45166e7b623506c9aba869d4c"
+checksum = "3748fcf5c3b711c9bb0bc0700723af79df837afe4c43985c0f2517eefde7db44"
 dependencies = [
  "anyhow",
  "ariadne",
@@ -2405,16 +2407,15 @@ dependencies = [
 
 [[package]]
 name = "octofhir-fhirschema"
-version = "0.3.33"
+version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fbc4749d83e38844e442842c6b45d6c7b8129ff6510cfa8174b0e098a9cd14b9"
+checksum = "768bcf0ffe4ab5f3f47937c37aa52fd6ac110162483accb3054d92a8f40e0289"
 dependencies = [
  "async-recursion",
  "async-trait",
  "chrono",
  "futures",
  "moka",
- "octofhir-canonical-manager",
  "octofhir-fhir-model",
  "once_cell",
  "regex",
@@ -2426,7 +2427,7 @@ dependencies = [
 
 [[package]]
 name = "octofhir-sof"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "arrow",
  "async-trait",
@@ -2453,7 +2454,7 @@ dependencies = [
 
 [[package]]
 name = "octofhir-sof-cli"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "annotate-snippets",
  "anyhow",
@@ -2472,7 +2473,7 @@ dependencies = [
 
 [[package]]
 name = "octofhir-sof-lint"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "banshee_hir",
  "banshee_parser",
