@@ -54,9 +54,15 @@ pub fn columns(spec: &[(&str, &'static str)]) -> Vec<(String, &'static str)> {
         .collect()
 }
 
-/// Why an expansion does not determine a membership, if it does not: it is
-/// a page (`offset`), it counts more members than it lists, or it says it
-/// is not closed.
+/// Why an expansion does not determine a membership, if it does not
+/// (Terminology in SQL: "one carrying an `offset`, or whose `total` exceeds
+/// the number of `contains` entries").
+///
+/// An expansion marked unclosed (`valueset-unclosed`: the code system admits
+/// members no expansion lists, such as SNOMED CT post-coordinated
+/// expressions) determines its enumerable members when its `total` shows
+/// they are all listed; without a `total` there is no telling, and it is
+/// refused. [`is_unclosed`] lets the provenance say so.
 pub fn incomplete_expansion(expansion: &Value) -> Option<String> {
     if expansion["offset"]
         .as_u64()
@@ -64,21 +70,31 @@ pub fn incomplete_expansion(expansion: &Value) -> Option<String> {
     {
         return Some("the expansion is a page (it carries an offset)".into());
     }
-    let unclosed = expansion["extension"]
+    match expansion["total"].as_u64() {
+        Some(total) => {
+            let listed = count_entries(&expansion["contains"]);
+            if total > listed as u64 {
+                return Some(format!("the expansion lists {listed} of {total} entries"));
+            }
+        }
+        None if is_unclosed(expansion) => {
+            return Some(
+                "the expansion is marked unclosed and gives no total to show it lists every member"
+                    .into(),
+            );
+        }
+        None => {}
+    }
+    None
+}
+
+/// Whether an expansion is marked unclosed (`valueset-unclosed`).
+pub fn is_unclosed(expansion: &Value) -> bool {
+    expansion["extension"]
         .as_array()
         .into_iter()
         .flatten()
-        .any(|extension| extension["url"] == UNCLOSED && extension["valueBoolean"] == true);
-    if unclosed {
-        return Some("the expansion is marked unclosed".into());
-    }
-    if let Some(total) = expansion["total"].as_u64() {
-        let listed = count_entries(&expansion["contains"]);
-        if total > listed as u64 {
-            return Some(format!("the expansion lists {listed} of {total} entries"));
-        }
-    }
-    None
+        .any(|extension| extension["url"] == UNCLOSED && extension["valueBoolean"] == true)
 }
 
 fn count_entries(contains: &Value) -> usize {
@@ -316,6 +332,9 @@ pub fn value_set_record(
             identity.insert(field.to_owned(), value.clone());
         }
     }
+    if is_unclosed(expansion) {
+        identity.insert("unclosed".to_owned(), Value::Bool(true));
+    }
     record["expansion"] = Value::Object(identity);
     record
 }
@@ -435,7 +454,20 @@ mod tests {
         assert!(value_set_rows(&short).unwrap_err().contains("3 of 4"));
         let mut unclosed = cvd_expansion();
         unclosed["extension"] = json!([{"url": UNCLOSED, "valueBoolean": true}]);
+        unclosed.as_object_mut().unwrap().remove("total");
         assert!(value_set_rows(&unclosed).unwrap_err().contains("unclosed"));
+        // With a total showing every enumerable member listed, it is taken.
+        unclosed["total"] = json!(3);
+        assert_eq!(value_set_rows(&unclosed).unwrap().len(), 2);
+        let record = value_set_record(
+            "cvd",
+            &json!({"url": "http://x/vs"}),
+            "here",
+            "here",
+            &unclosed,
+            2,
+        );
+        assert_eq!(record["expansion"]["unclosed"], true);
         let mut first_page = cvd_expansion();
         first_page["offset"] = json!(0);
         assert_eq!(value_set_rows(&first_page).unwrap().len(), 2);

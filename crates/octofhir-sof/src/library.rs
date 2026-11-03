@@ -9,11 +9,13 @@
 //! [`bind_parameters`] binds from a request's `Parameters`.
 
 use std::collections::HashMap;
+use std::sync::LazyLock;
 
 use base64::{Engine, engine::general_purpose::STANDARD};
+use regex::Regex;
 use serde_json::Value;
 
-use crate::{Error, Result};
+use crate::{Dialect, Error, Result};
 
 /// `Library.type` system of the SQL on FHIR Library profiles.
 pub const LIBRARY_TYPES: &str = "http://hl7.org/fhir/uv/sql-on-fhir/CodeSystem/LibraryTypesCodes";
@@ -56,20 +58,155 @@ impl DeclaredParameter {
 
     /// The SQL type (PostgreSQL spelling) a value of this type binds as, or
     /// `None` for a type that has no scalar SQL counterpart.
+    ///
+    /// Temporal values bind as text in their FHIR representation, as the
+    /// temporal columns of a view are (the spec's default type mapping), so
+    /// `bp.effective_date >= :from_date` compares like with like; a query
+    /// that needs calendar arithmetic casts both sides.
     pub fn sql_type(&self) -> Option<&'static str> {
         Some(match self.fhir_type.as_str() {
             "string" | "code" | "id" | "uri" | "url" | "canonical" | "oid" | "uuid"
-            | "markdown" | "base64Binary" => "text",
+            | "markdown" | "base64Binary" | "date" | "dateTime" | "instant" | "time" => "text",
             "integer" | "positiveInt" | "unsignedInt" => "integer",
             "integer64" => "bigint",
             "decimal" => "numeric",
             "boolean" => "boolean",
-            "date" => "date",
-            "dateTime" | "instant" => "timestamptz",
-            "time" => "time",
             _ => return None,
         })
     }
+
+    /// The SQL type a value of this type binds as in `dialect`; DuckDB's
+    /// `numeric` alone is DECIMAL(18,3), so it is spelled out there.
+    pub fn sql_type_in(&self, dialect: Dialect) -> Option<&'static str> {
+        let portable = self.sql_type()?;
+        Some(match (dialect, portable) {
+            (Dialect::DuckDb, "numeric") => "DECIMAL(38,9)",
+            (Dialect::Ansi, "text") => "CHARACTER VARYING",
+            (Dialect::Ansi, "numeric") => "DECIMAL",
+            (_, portable) => portable,
+        })
+    }
+}
+
+/// SQL with its `:name` parameters made positional (`$1`, `$2`, ...), and
+/// the parameter name of each position.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PositionalSql {
+    pub sql: String,
+    pub parameters: Vec<String>,
+}
+
+/// Rewrite the `:name` parameters of `sql` (SQL on FHIR, SQLQuery
+/// "Parameters") to positional ones, each cast to its declared type in
+/// `dialect`: `CAST($1 AS date)`. Only names `library` declares are
+/// parameters, so other `:` uses (`::` casts, DuckDB slices and struct
+/// literals) stay as written; string literals, quoted identifiers,
+/// dollar-quoted strings and comments are skipped. A name used twice shares
+/// one position.
+///
+/// This is lexical: hosts that run untrusted SQL also check it on a syntax
+/// tree before running it.
+pub fn positional_parameters(library: &SqlLibrary, dialect: Dialect) -> PositionalSql {
+    let declared: HashMap<&str, Option<&'static str>> = library
+        .parameters
+        .iter()
+        .map(|parameter| (parameter.name.as_str(), parameter.sql_type_in(dialect)))
+        .collect();
+    let sql = library.sql.as_str();
+    let bytes = sql.as_bytes();
+    let mut out = String::with_capacity(sql.len());
+    let mut names: Vec<String> = Vec::new();
+    let mut at = 0;
+    let mut copied = 0;
+    while at < bytes.len() {
+        let skip_to = match bytes[at] {
+            b'\'' => closing(bytes, at + 1, b'\''),
+            b'"' => closing(bytes, at + 1, b'"'),
+            b'-' if bytes.get(at + 1) == Some(&b'-') => {
+                sql[at..].find('\n').map_or(bytes.len(), |end| at + end + 1)
+            }
+            b'/' if bytes.get(at + 1) == Some(&b'*') => sql[at + 2..]
+                .find("*/")
+                .map_or(bytes.len(), |end| at + 2 + end + 2),
+            b'$' => dollar_quoted(sql, at).unwrap_or(at + 1),
+            b':' if bytes.get(at + 1) == Some(&b':') => at + 2,
+            b':' if at == 0 || !is_identifier_byte(bytes[at - 1]) => {
+                let end = (at + 1..bytes.len())
+                    .find(|&index| !is_identifier_byte(bytes[index]))
+                    .unwrap_or(bytes.len());
+                let name = &sql[at + 1..end];
+                match declared.get(name) {
+                    Some(sql_type) if !name.is_empty() && !bytes[at + 1].is_ascii_digit() => {
+                        let position = match names.iter().position(|known| known == name) {
+                            Some(position) => position + 1,
+                            None => {
+                                names.push(name.to_owned());
+                                names.len()
+                            }
+                        };
+                        out.push_str(&sql[copied..at]);
+                        match sql_type {
+                            Some(sql_type) => {
+                                out.push_str(&format!("CAST(${position} AS {sql_type})"))
+                            }
+                            None => out.push_str(&format!("${position}")),
+                        }
+                        copied = end;
+                        end
+                    }
+                    _ => end,
+                }
+            }
+            _ => at + 1,
+        };
+        at = skip_to;
+    }
+    out.push_str(&sql[copied..]);
+    PositionalSql {
+        sql: out,
+        parameters: names,
+    }
+}
+
+fn is_identifier_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
+/// Index after the quote closing a literal opened before `from`; a doubled
+/// quote is an escaped one.
+fn closing(bytes: &[u8], from: usize, quote: u8) -> usize {
+    let mut at = from;
+    while at < bytes.len() {
+        if bytes[at] == quote {
+            if bytes.get(at + 1) == Some(&quote) {
+                at += 2;
+                continue;
+            }
+            return at + 1;
+        }
+        at += 1;
+    }
+    bytes.len()
+}
+
+/// Index after a PostgreSQL dollar-quoted string (`$tag$ ... $tag$`) that
+/// starts at `from`, if one does.
+fn dollar_quoted(sql: &str, from: usize) -> Option<usize> {
+    let rest = &sql[from + 1..];
+    let tag_end = rest.find('$')?;
+    let tag = &rest[..tag_end];
+    if !tag.bytes().all(is_identifier_byte)
+        || tag.bytes().next().is_some_and(|b| b.is_ascii_digit())
+    {
+        return None;
+    }
+    let delimiter = format!("${tag}$");
+    let body = from + 1 + tag_end + 1;
+    Some(
+        sql[body..]
+            .find(&delimiter)
+            .map_or(sql.len(), |end| body + end + delimiter.len()),
+    )
 }
 
 /// A SQLQuery or SQLView, with the SQL for one dialect.
@@ -299,7 +436,17 @@ pub fn bind_parameters(
                 .ok_or_else(|| invalid(format!("{name} is not an integer")))?,
             (Some("boolean"), Value::Bool(flag)) => ParameterValue::Boolean(*flag),
             (Some("numeric"), Value::Number(number)) => ParameterValue::Decimal(number.to_string()),
-            (Some(_), Value::String(text)) => ParameterValue::Text(text.clone()),
+            (Some(_), Value::String(text)) => {
+                if let Some(pattern) = temporal_pattern(&declared.fhir_type)
+                    && !pattern.is_match(text)
+                {
+                    return Err(invalid(format!(
+                        "{name}: {text} is not a FHIR {}",
+                        declared.fhir_type
+                    )));
+                }
+                ParameterValue::Text(text.clone())
+            }
             _ => return Err(invalid(format!("{name} has a value of the wrong type"))),
         };
         if bound.insert(name.to_owned(), bound_value).is_some() {
@@ -315,6 +462,35 @@ pub fn bind_parameters(
         }
     }
     Ok(bound)
+}
+
+/// The lexical form of a FHIR temporal type (FHIR, "Primitive Types").
+fn temporal_pattern(fhir_type: &str) -> Option<&'static Regex> {
+    static DATE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"^\d{4}(-(0[1-9]|1[0-2])(-(0[1-9]|[12]\d|3[01]))?)?$").expect("valid pattern")
+    });
+    static DATE_TIME: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(
+            r"^\d{4}(-(0[1-9]|1[0-2])(-(0[1-9]|[12]\d|3[01])(T([01]\d|2[0-3]):[0-5]\d:([0-5]\d|60)(\.\d{1,9})?(Z|[+-]((0\d|1[0-3]):[0-5]\d|14:00)))?)?)?$",
+        )
+        .expect("valid pattern")
+    });
+    static INSTANT: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(
+            r"^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])T([01]\d|2[0-3]):[0-5]\d:([0-5]\d|60)(\.\d{1,9})?(Z|[+-]((0\d|1[0-3]):[0-5]\d|14:00))$",
+        )
+        .expect("valid pattern")
+    });
+    static TIME: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"^([01]\d|2[0-3]):[0-5]\d:([0-5]\d|60)(\.\d{1,9})?$").expect("valid pattern")
+    });
+    Some(match fhir_type {
+        "date" => &DATE,
+        "dateTime" => &DATE_TIME,
+        "instant" => &INSTANT,
+        "time" => &TIME,
+        _ => return None,
+    })
 }
 
 /// Canonical of the `sql-text` extension (the SQL in plain text on an
@@ -766,6 +942,37 @@ mod tests {
                 }
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn declared_parameters_become_positional_and_typed() {
+        let library = SqlLibrary {
+            kind: SqlLibraryKind::Query,
+            display: "q".into(),
+            sql: "SELECT a::text, ':since', \"x:since\", list[1:2], $$ :since $$ -- :since\n\
+                  FROM t WHERE d >= :since AND n = :limit AND d < :since /* :limit */ AND s = :other"
+                .into(),
+            dependencies: Vec::new(),
+            parameters: vec![
+                DeclaredParameter {
+                    name: "since".into(),
+                    fhir_type: "date".into(),
+                    required: true,
+                },
+                DeclaredParameter {
+                    name: "limit".into(),
+                    fhir_type: "decimal".into(),
+                    required: false,
+                },
+            ],
+        };
+        let positional = positional_parameters(&library, Dialect::DuckDb);
+        assert_eq!(positional.parameters, ["since", "limit"]);
+        assert_eq!(
+            positional.sql,
+            "SELECT a::text, ':since', \"x:since\", list[1:2], $$ :since $$ -- :since\n\
+             FROM t WHERE d >= CAST($1 AS text) AND n = CAST($2 AS DECIMAL(38,9)) AND d < CAST($1 AS text) /* :limit */ AND s = :other"
         );
     }
 }
