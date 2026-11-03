@@ -5,8 +5,9 @@ description: The octofhir-sof, octofhir-sof-lint and octofhir-sof-cli crates and
 
 Three crates make up the project:
 
-- **`octofhir-sof`** — the network-free engine: parsing, in-memory evaluation,
-  and SQL generation.
+- **`octofhir-sof`** — the engine: parsing, in-memory evaluation, SQL
+  generation, and the SQL on FHIR 3.0 job layer (network, files and DuckDB
+  behind features).
 - **`octofhir-sof-lint`** — offline lint and validation of ViewDefinitions.
 - **`octofhir-sof-cli`** — the thin `octofhir-sof` binary over the two above.
 
@@ -109,12 +110,19 @@ crate still includes HTTP dependencies for schema/package providers.
 
 | Module | What it gives a host |
 |---|---|
-| `library` | `SqlLibrary::from_json(library, dialect)`, `bind_parameters`, `build_annotated` (a Library from annotated SQL) |
-| `plan` | `ContextArtifacts`, `Resolver` over an `ArtifactSource`, `ResolvedJob` (serde), `closure` (CTE order) |
+| `library` | `SqlLibrary::from_json(library, dialect)`, `bind_parameters`, `positional_parameters` (`:name` → `$n`), `build_annotated` (a Library from annotated SQL) |
+| `plan` | `ContextArtifacts` (`from_parameters`, `from_resources`), `Resolver` over an `ArtifactSource`, `ResolvedJob` (serde), `closure` (CTE order) |
 | `relations` | `value_set_rows`, `concept_map_rows`, the relation columns, provenance records |
-| `expansion` | `Expander` over a `TerminologySource`, `ExpansionStamp`, `ExpansionError` |
+| `expansion` | `Expander` over a `TerminologySource`, `ExpansionStamp` (`now()`), `ExpansionError` |
+| `catalog` | `Catalog` (files, directories, packages; `.tgz` with feature `packages`), `CatalogSource`, `compare_versions`, `value_set_content`, `RemoteFallback` over any `TerminologyProvider` (`HttpTerminologyProvider` with feature `tx-remote`) |
+| `embedded` | `DuckDbJob` (`load`, `sandbox`, `run` into a `RowSink`, `collect`, `describe`) — feature `duckdb` |
+| `guard` | `check`, `check_library`, `ALLOWED_FUNCTIONS` — feature `guard` |
 | `output` | `RowEncoder` / `RowFormat`; `ParquetStreamEncoder` (feature `parquet`) |
 | `Dialect::value_type` | the column type generated SQL gives a view column, for tables a host fills itself |
+
+Features: `postgres` (sqlx `ViewRunner`), `parquet`, `tx-remote`, `packages`,
+`duckdb` (bundled DuckDB, a C++ build), `guard` (banshee). None is on by
+default; the CLI turns on `postgres`, `duckdb`, `packages` and `guard`.
 
 See [SQL on FHIR 3.0 jobs](/sof/guides/sql-on-fhir-3/).
 

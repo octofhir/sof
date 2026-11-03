@@ -19,6 +19,14 @@ SQLView Library reads in the PostgreSQL and DuckDB dialects, and every
 ViewDefinition passes the 3.0 structural rules, compiles for the in-memory
 engine and lowers to SQL (`cargo test --test v3_examples`).
 
+The guide's SQLQuery and SQLView Libraries also run end to end, in the
+embedded DuckDB, over views, a value set, a concept map and resources written
+for them (`examples/sql`; `cargo test -p octofhir-sof-cli --test sql_cli`):
+SQLViews read as tables, `:name` parameters bound by declared type, value set
+and concept map relations, `$sql-export`-style jobs with one resolution per
+canonical, and (with `--ignored`, over the network) a SNOMED CT value set
+expanded by a terminology server.
+
 ## Producing a result file for the registry
 
 `sql-on-fhir.org` aggregates a [public registry][impls] of implementations.

@@ -20,6 +20,8 @@ The DuckDB SQL path is additionally verified through the `duckdb` CLI.
 The 3.0 guide's examples (`tests/fixtures/v3-examples`) are tests as well:
 every SQLQuery and SQLView Library reads in both dialects, and every
 ViewDefinition passes the 3.0 structural rules, compiles and lowers to SQL.
+The Libraries also run end to end in the embedded DuckDB over the views,
+terminology and resources of `examples/sql` (`octofhir-sof sql run`).
 
 ## Running the suite
 

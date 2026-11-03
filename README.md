@@ -29,8 +29,9 @@ Views written for 2.0 / 2.1 run unchanged (3.0 kept the view semantics).
 - The view model of 3.0: `repeat` and `%rowIndex` on both paths, and the
   structural rules checked before a view runs (SQL names, one iteration
   directive per select, `unionAll` branches with the same columns and types).
-- **The SQL layer of 3.0**, host-independent (no database, network or clock;
-  a server, a CLI or an embedded engine plugs in where artifacts come from):
+- **The SQL layer of 3.0**: a host-independent core (no database or network;
+  a server plugs in where artifacts come from and where SQL runs), and, for
+  hosts without either, the pieces to run jobs anywhere:
   - `library` — SQLQuery / SQLView Libraries: the SQL of a dialect, the
     dependencies, parameter binding, and a builder from annotated SQL
     (`@param`, `@relatedDependency`, ...);
@@ -40,7 +41,16 @@ Views written for 2.0 / 2.1 run unchanged (3.0 kept the view semantics).
     dependencies as tables, and a strict ValueSet expander that says what it
     cannot determine instead of leaving it out;
   - `output::RowEncoder` and `ParquetStreamEncoder` — rows streamed to ndjson,
-    csv, json or Parquet files without holding the result.
+    csv, json or Parquet files without holding the result;
+  - `catalog` — dependencies from files, directories and FHIR packages, the
+    latest-version rule, and a terminology server (`tx-remote`) for value
+    sets beyond the local expander;
+  - `embedded::DuckDbJob` (`duckdb`) — whole SQLQuery jobs in an embedded,
+    sandboxed DuckDB;
+  - `guard` (`guard`) — the static check of SQL a host runs on its own
+    PostgreSQL.
+- **`octofhir-sof sql`**: build Libraries from annotated SQL, check them
+  against their dependencies, run and export SQLQueries over FHIR files.
 - Every example of the 3.0 guide (views and libraries) is part of the test
   suite.
 
@@ -106,6 +116,19 @@ octofhir-sof lint view.json --shareable
 
 # Run the official content-test format in memory
 octofhir-sof test tests/
+
+# SQL on FHIR 3.0: a SQLQuery over its views, value sets and concept maps,
+# in an embedded DuckDB (artifacts from files, directories or FHIR packages)
+octofhir-sof sql check examples/sql/libraries/Library-ConditionsToIcd10Query.json -a examples/sql
+octofhir-sof sql run examples/sql/libraries/Library-SqlOnFhirExample.json -a examples/sql \
+  --input examples/sql/resources.ndjson -p patient_id=p1 -p from_date=2026-01-01 -p to_date=2026-03-31
+
+# Value sets the local expander cannot evaluate go to a terminology server
+octofhir-sof sql run query.sql -a artifacts/ --input data/ --tx https://tx.fhir.org/r4 --provenance prov.json
+
+# Annotated SQL to a Library; several queries as one job into a directory
+octofhir-sof sql build cardiac_patients.sql --url https://example.org/Library/cardiac > cardiac.json
+octofhir-sof sql export q1.json q2.sql -a artifacts/ --input data/ --output parquet --out out/
 ```
 
 Exit codes: `0` on success, `1` on validation errors, lint errors, test
@@ -187,6 +210,29 @@ let job = resolver.finish()?; // views, SQLViews, value set / concept map rows
 for (label, artifact) in closure(&job, &edges)? {
     // materialize job.artifacts[artifact] as `label`, then run query.sql
 }
+```
+
+Or let the library find the artifacts and run the job (features `packages`,
+`tx-remote`, `duckdb`):
+
+```rust
+use octofhir_sof::catalog::{Catalog, CatalogSource};
+use octofhir_sof::terminology::HttpTerminologyProvider;
+use octofhir_sof::embedded::DuckDbJob;
+
+let mut catalog = Catalog::new();
+catalog.load("artifacts/".as_ref())?;
+// The same provider answers memberOf() in views (CompileOptions::with_terminology).
+let tx = HttpTerminologyProvider::new("https://tx.fhir.org/r4".into())?;
+let source = CatalogSource::new(&catalog).with_remote(&tx);
+let mut resolver = Resolver::new(&source, &context, "duckdb");
+let edges = resolver.subject(&query).await?;
+let job = resolver.finish()?;
+
+let mut duck = DuckDbJob::open_in_memory()?;
+duck.load(&job, &resources, 4, &CompileOptions::default())?;
+duck.sandbox()?;
+let rows = duck.collect(&job, &edges, &query, &values)?;
 ```
 
 ## SQL dialects
