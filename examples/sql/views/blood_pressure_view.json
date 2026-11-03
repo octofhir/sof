@@ -1,0 +1,52 @@
+{
+  "resourceType": "ViewDefinition",
+  "url": "https://example.org/ViewDefinition/blood_pressure_view",
+  "name": "blood_pressure_view",
+  "status": "active",
+  "resource": "Observation",
+  "title": "Blood pressure",
+  "constant": [
+    {
+      "name": "systolic",
+      "valueCode": "8480-6"
+    },
+    {
+      "name": "diastolic",
+      "valueCode": "8462-4"
+    }
+  ],
+  "select": [
+    {
+      "column": [
+        {
+          "name": "id",
+          "path": "getResourceKey()"
+        },
+        {
+          "name": "patient_id",
+          "path": "subject.getReferenceKey(Patient)"
+        },
+        {
+          "name": "effective_date",
+          "path": "effective.ofType(dateTime)",
+          "type": "dateTime"
+        },
+        {
+          "name": "systolic",
+          "path": "component.where(code.coding.exists(system = 'http://loinc.org' and code = %systolic)).value.ofType(Quantity).value.first()",
+          "type": "decimal"
+        },
+        {
+          "name": "diastolic",
+          "path": "component.where(code.coding.exists(system = 'http://loinc.org' and code = %diastolic)).value.ofType(Quantity).value.first()",
+          "type": "decimal"
+        }
+      ]
+    }
+  ],
+  "where": [
+    {
+      "path": "code.coding.exists(system = 'http://loinc.org' and code = '85354-9')"
+    }
+  ]
+}

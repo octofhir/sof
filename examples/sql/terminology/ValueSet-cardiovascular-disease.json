@@ -1,0 +1,32 @@
+{
+  "resourceType": "ValueSet",
+  "url": "http://example.org/ValueSet/cardiovascular-disease",
+  "version": "2026",
+  "name": "CardiovascularDisease",
+  "status": "active",
+  "compose": {
+    "include": [
+      {
+        "system": "http://snomed.info/sct",
+        "concept": [
+          {
+            "code": "22298006",
+            "display": "Myocardial infarction"
+          },
+          {
+            "code": "38341003",
+            "display": "Hypertensive disorder"
+          },
+          {
+            "code": "84114007",
+            "display": "Heart failure"
+          },
+          {
+            "code": "49436004",
+            "display": "Atrial fibrillation"
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,49 @@
+{
+  "resourceType": "ViewDefinition",
+  "url": "https://example.org/ViewDefinition/patient_address_view",
+  "name": "patient_address_view",
+  "status": "active",
+  "resource": "Patient",
+  "title": "Patient addresses",
+  "select": [
+    {
+      "column": [
+        {
+          "name": "patient_id",
+          "path": "getResourceKey()"
+        }
+      ]
+    },
+    {
+      "forEach": "address",
+      "column": [
+        {
+          "name": "address_id",
+          "path": "%rowIndex",
+          "type": "integer"
+        },
+        {
+          "name": "address_line1",
+          "path": "line.first()"
+        },
+        {
+          "name": "city",
+          "path": "city"
+        },
+        {
+          "name": "state",
+          "path": "state"
+        },
+        {
+          "name": "postal_code",
+          "path": "postalCode"
+        },
+        {
+          "name": "updated_at",
+          "path": "period.start",
+          "type": "dateTime"
+        }
+      ]
+    }
+  ]
+}

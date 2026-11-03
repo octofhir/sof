@@ -1,0 +1,59 @@
+{
+  "resourceType": "ConceptMap",
+  "url": "http://example.org/ConceptMap/sct-to-icd10",
+  "version": "2026",
+  "name": "SctToIcd10",
+  "status": "active",
+  "group": [
+    {
+      "source": "http://snomed.info/sct",
+      "target": "http://hl7.org/fhir/sid/icd-10",
+      "element": [
+        {
+          "code": "22298006",
+          "display": "Myocardial infarction",
+          "target": [
+            {
+              "code": "I21.9",
+              "display": "Acute myocardial infarction, unspecified",
+              "relationship": "equivalent"
+            }
+          ]
+        },
+        {
+          "code": "38341003",
+          "display": "Hypertensive disorder",
+          "target": [
+            {
+              "code": "I10",
+              "display": "Essential (primary) hypertension",
+              "relationship": "source-is-narrower-than-target"
+            }
+          ]
+        },
+        {
+          "code": "84114007",
+          "display": "Heart failure",
+          "target": [
+            {
+              "code": "I50.9",
+              "display": "Heart failure, unspecified",
+              "relationship": "equivalent"
+            }
+          ]
+        },
+        {
+          "code": "44054006",
+          "display": "Diabetes mellitus type 2",
+          "target": [
+            {
+              "code": "E11.9",
+              "display": "Type 2 diabetes mellitus without complications",
+              "relationship": "equivalent"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

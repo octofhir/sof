@@ -1,0 +1,32 @@
+{
+  "resourceType": "ViewDefinition",
+  "url": "https://example.org/ViewDefinition/patient_view",
+  "name": "patient_view",
+  "status": "active",
+  "resource": "Patient",
+  "title": "Patients",
+  "select": [
+    {
+      "column": [
+        {
+          "name": "id",
+          "path": "getResourceKey()"
+        },
+        {
+          "name": "name",
+          "path": "name.where(use = 'official').first().given.first() & ' ' & name.where(use = 'official').first().family"
+        },
+        {
+          "name": "birth_date",
+          "path": "birthDate",
+          "type": "date"
+        },
+        {
+          "name": "active",
+          "path": "active",
+          "type": "boolean"
+        }
+      ]
+    }
+  ]
+}

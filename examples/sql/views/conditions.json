@@ -1,0 +1,44 @@
+{
+  "resourceType": "ViewDefinition",
+  "url": "https://example.org/ViewDefinition/conditions",
+  "name": "conditions",
+  "status": "active",
+  "resource": "Condition",
+  "title": "Condition codings",
+  "select": [
+    {
+      "column": [
+        {
+          "name": "id",
+          "path": "getResourceKey()"
+        },
+        {
+          "name": "patient_id",
+          "path": "subject.getReferenceKey(Patient)"
+        },
+        {
+          "name": "onset",
+          "path": "onset.ofType(dateTime)",
+          "type": "dateTime"
+        }
+      ]
+    },
+    {
+      "forEach": "code.coding",
+      "column": [
+        {
+          "name": "system",
+          "path": "system"
+        },
+        {
+          "name": "code",
+          "path": "code"
+        },
+        {
+          "name": "display",
+          "path": "display"
+        }
+      ]
+    }
+  ]
+}

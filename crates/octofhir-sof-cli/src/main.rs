@@ -5,17 +5,19 @@
 //! library so it stays embeddable.
 
 mod diagnostic;
+mod sql;
 
 use std::fs;
 use std::io::{self, Write};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 #[cfg(feature = "postgres")]
 use octofhir_sof::ViewRunner;
 use octofhir_sof::output::{OutputWriter, get_writer};
-use octofhir_sof::{CompileOptions, SqlGenerator, ViewDefinition, ViewResult};
+use octofhir_sof::{CompileOptions, SqlGenerator, TerminologyProvider, ViewDefinition, ViewResult};
 use octofhir_sof_lint::{FhirSchemaProvider, Severity, lint, lint_shareable, validate_structure};
 #[cfg(feature = "postgres")]
 use sqlx_postgres::PgPool;
@@ -161,6 +163,13 @@ enum Command {
         #[arg(long, conflicts_with = "json")]
         sarif: bool,
     },
+
+    /// SQLQuery and SQLView Libraries (SQL on FHIR v3): build from annotated
+    /// SQL, check, run over FHIR resources in an embedded DuckDB, export.
+    Sql {
+        #[command(subcommand)]
+        command: sql::SqlCommand,
+    },
 }
 
 /// Read a ViewDefinition file, returning both its raw text (for diagnostics
@@ -187,12 +196,13 @@ enum Source {
     Db(PgPool),
 }
 
-/// In-memory compile options for `run`: a terminology provider when `--tx` is
-/// given. Remote answers are cached for the run, since a view tests the same
-/// codes against the same value sets resource after resource.
-fn compile_options(tx: Option<&str>) -> Result<CompileOptions> {
+/// The terminology server of `--tx`, as the ecosystem's provider: answers
+/// memberOf(), subsumes() and translate() in views and expands the value
+/// sets of SQL jobs. Answers are cached for the run, since a view tests the
+/// same codes against the same value sets resource after resource.
+fn terminology(tx: Option<&str>) -> Result<Option<Arc<dyn TerminologyProvider>>> {
     let Some(url) = tx else {
-        return Ok(CompileOptions::default());
+        return Ok(None);
     };
     #[cfg(feature = "tx-remote")]
     {
@@ -202,9 +212,7 @@ fn compile_options(tx: Option<&str>) -> Result<CompileOptions> {
         let remote = HttpTerminologyProvider::new(url.to_string())
             .map_err(|e| anyhow::anyhow!("terminology server {url}: {e}"))?;
         let cached = CachedTerminologyProvider::new(remote, TerminologyCacheConfig::default());
-        Ok(CompileOptions::with_terminology(std::sync::Arc::new(
-            cached,
-        )))
+        Ok(Some(Arc::new(cached)))
     }
     #[cfg(not(feature = "tx-remote"))]
     {
@@ -212,6 +220,14 @@ fn compile_options(tx: Option<&str>) -> Result<CompileOptions> {
             "--tx {url} needs a build with the tx-remote feature \
              (cargo install octofhir-sof-cli --features tx-remote)"
         )
+    }
+}
+
+/// In-memory compile options with `provider` for the terminology functions.
+fn compile_options(provider: Option<&Arc<dyn TerminologyProvider>>) -> CompileOptions {
+    match provider {
+        Some(provider) => CompileOptions::with_terminology(Arc::clone(provider)),
+        None => CompileOptions::default(),
     }
 }
 
@@ -664,6 +680,7 @@ async fn main() {
 
 async fn run(cli: Cli, color: bool) -> Result<()> {
     match cli.command {
+        Command::Sql { command } => sql::run(command).await?,
         Command::Generate {
             view,
             ddl,
@@ -703,7 +720,7 @@ async fn run(cli: Cli, color: bool) -> Result<()> {
                      terminology functions"
                 );
             }
-            let options = compile_options(tx.as_deref())?;
+            let options = compile_options(terminology(tx.as_deref())?.as_ref());
             let threads = threads
                 .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()));
             let writer = select_writer(&output, &parquet_temporal)?;
