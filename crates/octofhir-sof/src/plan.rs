@@ -164,6 +164,16 @@ impl ContextArtifacts {
         })
     }
 
+    /// Entries supplied directly (a CLI's `--context` files, say), checked
+    /// as [`Self::from_parameters`] checks them.
+    pub fn from_resources(resources: Vec<Value>) -> Result<Self, PlanError> {
+        let parameters: Vec<Value> = resources
+            .into_iter()
+            .map(|resource| serde_json::json!({"name": "context", "resource": resource}))
+            .collect();
+        Self::from_parameters(&serde_json::json!({ "parameter": parameters }))
+    }
+
     /// Whether the request supplied any entry.
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()

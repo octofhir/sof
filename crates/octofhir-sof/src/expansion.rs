@@ -27,7 +27,8 @@
 //! (`used-valueset`) the membership was computed from. Where value sets and
 //! code systems come from is the host's [`TerminologySource`]; the
 //! expansion's identifier and timestamp are the host's [`ExpansionStamp`], so
-//! the module needs no clock or random source (it builds for WASM).
+//! the module needs no clock or random source ([`ExpansionStamp::now`] is a
+//! default).
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::future::Future;
@@ -64,6 +65,18 @@ pub enum ExpansionError {
 pub struct ExpansionStamp {
     pub identifier: String,
     pub timestamp: String,
+}
+
+impl ExpansionStamp {
+    /// A new `urn:uuid:` identifier and the current UTC time.
+    pub fn now() -> Self {
+        Self {
+            identifier: format!("urn:uuid:{}", uuid::Uuid::new_v4()),
+            timestamp: chrono::Utc::now()
+                .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+                .to_string(),
+        }
+    }
 }
 
 /// A canonical resource found by a [`TerminologySource`], and where from.
@@ -488,9 +501,7 @@ impl<'a> Expander<'a> {
         let resolved = match self.source.find("CodeSystem", url, version).await? {
             Lookup::Found(resolved) => resolved,
             Lookup::Missing => {
-                return Ok(Err(format!(
-                    "code system {named} cannot be resolved on this server"
-                )));
+                return Ok(Err(format!("code system {named} cannot be resolved here")));
             }
             Lookup::Ambiguous(reason) => return Ok(Err(reason)),
         };

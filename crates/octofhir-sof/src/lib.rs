@@ -64,9 +64,14 @@
 //! 3.0.0 ballot): <https://build.fhir.org/ig/HL7/sql-on-fhir/>. Views written for
 //! 2.0 / 2.1 run unchanged.
 
+pub mod catalog;
 mod column;
+#[cfg(feature = "duckdb")]
+pub mod embedded;
 mod eval;
 pub mod expansion;
+#[cfg(feature = "guard")]
+pub mod guard;
 pub mod library;
 pub mod output;
 pub mod plan;

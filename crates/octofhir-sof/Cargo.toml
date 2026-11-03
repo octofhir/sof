@@ -32,15 +32,30 @@ regex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
+# SQL check on the PostgreSQL syntax tree (feature `guard`)
+banshee_parser = { workspace = true, optional = true }
+banshee_lexer = { workspace = true, optional = true }
+banshee_syntax = { workspace = true, optional = true }
+
+# Embedded SQL executor (feature `duckdb`)
+duckdb = { workspace = true, optional = true }
+
 # Output formats
 csv = { workspace = true }
 arrow = { workspace = true, optional = true }
 parquet = { workspace = true, optional = true }
-chrono = { workspace = true, optional = true }
+chrono = { workspace = true, features = ["clock"] }
+
+# Artifact catalogs: version order, expansion identity, package archives
+# (feature `packages`)
+semver = { workspace = true }
+uuid = { workspace = true }
+flate2 = { workspace = true, optional = true }
+tar = { workspace = true, optional = true }
 
 # Async
 async-trait = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["rt", "io-util"] }
 futures-util = { workspace = true }
 pin-project-lite = { workspace = true }
 
@@ -56,14 +71,20 @@ default = []
 # SQL generation itself needs no feature; hosts with their own pool implement
 # `SqlExecutor` instead.
 postgres = ["dep:sqlx-core", "dep:sqlx-postgres"]
-parquet = ["dep:arrow", "dep:parquet", "dep:chrono"]
+parquet = ["dep:arrow", "dep:parquet"]
 # `HttpTerminologyProvider` (+ `CachedTerminologyProvider`) for resolving
 # memberOf/subsumes/translate against a remote FHIR terminology server.
 tx-remote = ["octofhir-fhir-model/http-client", "octofhir-fhir-model/caching"]
+# `guard::check`: the static check of SQL a host runs on its own PostgreSQL.
+guard = ["dep:banshee_parser", "dep:banshee_lexer", "dep:banshee_syntax"]
+# `DuckDbJob`: SQLQuery jobs in an embedded DuckDB (bundled, no server).
+duckdb = ["dep:duckdb"]
+# `Catalog::load` of FHIR package archives (`.tgz`).
+packages = ["dep:flate2", "dep:tar"]
 
 [dev-dependencies]
 bytes = { workspace = true }
 tracing-subscriber = { workspace = true }
 tokio-test = "0.4.6"
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
 serde_json = { workspace = true }

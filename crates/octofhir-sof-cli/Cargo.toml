@@ -24,17 +24,23 @@ clap = { workspace = true }
 anyhow = { workspace = true }
 annotate-snippets = { workspace = true }
 serde_json = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
 sqlx-postgres = { workspace = true, optional = true }
 tracing-subscriber = { workspace = true, optional = true }
 
 [features]
 # `run --db` stays available in a default install.
-default = ["postgres"]
+default = ["postgres", "duckdb", "packages", "guard"]
 postgres = ["octofhir-sof/postgres", "dep:sqlx-postgres"]
 parquet = ["octofhir-sof/parquet", "dep:tracing-subscriber"]
 # `run --tx <url>`: resolve memberOf/subsumes/translate against a terminology server.
 tx-remote = ["octofhir-sof/tx-remote"]
+# `sql run` / `sql export` / `sql check` in an embedded DuckDB.
+duckdb = ["octofhir-sof/duckdb"]
+# `sql check` reports whether the PostgreSQL SQL passes the server-side check.
+guard = ["octofhir-sof/guard"]
+# `--artifacts` FHIR package archives (.tgz).
+packages = ["octofhir-sof/packages"]
 
 [dev-dependencies]
 arrow = { workspace = true }

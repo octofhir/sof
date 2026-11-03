@@ -105,6 +105,24 @@ impl ColumnType {
         }
     }
 
+    /// The FHIR type of the column's values, or `None` for a collection
+    /// (JSON) column.
+    pub fn fhir_type(&self) -> Option<&'static str> {
+        Some(match self {
+            Self::String => "string",
+            Self::Integer => "integer",
+            Self::Integer64 => "integer64",
+            Self::Decimal => "decimal",
+            Self::Boolean => "boolean",
+            Self::Date => "date",
+            Self::DateTime => "dateTime",
+            Self::Instant => "instant",
+            Self::Time => "time",
+            Self::Base64Binary => "base64Binary",
+            Self::Json => return None,
+        })
+    }
+
     /// Parse a column type from an ANSI SQL type name, as supplied by an
     /// `ansi/type` column tag overriding the inferred type. Unknown names fall
     /// back to `String`.
