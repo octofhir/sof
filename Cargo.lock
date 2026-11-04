@@ -2206,10 +2206,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "octofhir-canonical-manager"
-version = "0.2.10"
+name = "octofhir-canonical-core"
+version = "0.2.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b21dc3a426ca4967d4247160bb5e14951f35f9f9a90915f1c241cdd54b2f4700"
+checksum = "254fc10917e8afe60d3d6b6c8d99688bffc2046d4e7d0edfb0f2d5bb461f84f6"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -2246,6 +2246,15 @@ dependencies = [
  "urlencoding",
  "uuid",
  "walkdir",
+]
+
+[[package]]
+name = "octofhir-canonical-manager"
+version = "0.2.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fbbfc3752bf63f388f4a56bc36159cadb91e7a3162f13ca12da419d6f6c90d40"
+dependencies = [
+ "octofhir-canonical-core",
 ]
 
 [[package]]
