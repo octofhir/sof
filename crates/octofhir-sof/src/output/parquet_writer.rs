@@ -14,12 +14,12 @@ use futures_util::{Stream, StreamExt};
 use serde_json::Value;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 
-use arrow::array::{
+use arrow_array::RecordBatch;
+use arrow_array::{
     ArrayRef, BooleanArray, Date32Array, Float64Array, Int64Array, StringArray,
     Time64MicrosecondArray, TimestampMicrosecondArray,
 };
-use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
-use arrow::record_batch::RecordBatch;
+use arrow_schema::{DataType, Field, Schema, TimeUnit};
 use parquet::arrow::ArrowWriter;
 use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;

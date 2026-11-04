@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.3.3"
+version = "0.3.4"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/octofhir/sof"
@@ -13,16 +13,16 @@ authors = ["OctoFHIR Team <funyloony@gmail.com>"]
 [workspace.dependencies]
 # Internal (version is required so dependent crates carry a real requirement
 # when published to crates.io; keep in sync with workspace.package.version)
-octofhir-sof = { path = "crates/octofhir-sof", version = "0.3.3" }
-octofhir-sof-lint = { path = "crates/octofhir-sof-lint", version = "0.3.3" }
+octofhir-sof = { path = "crates/octofhir-sof", version = "0.3.4" }
+octofhir-sof-lint = { path = "crates/octofhir-sof-lint", version = "0.3.4" }
 
 # Ecosystem (crates.io)
-octofhir-fhirpath = { version = "0.5.3", default-features = false }
-octofhir-fhirschema = "0.3.34"
-octofhir-canonical-manager = "0.2.8"
+octofhir-fhirpath = { version = "0.5.5", default-features = false }
+octofhir-fhirschema = { version = "0.3.35", default-features = false }
+octofhir-canonical-manager = { version = "0.2.10", default-features = false, features = ["sqlite"] }
 # TerminologyProvider trait (memberOf/subsumes/translate in views). The HTTP
 # provider sits behind its `http-client` feature, enabled only by `tx-remote`.
-octofhir-fhir-model = { version = "0.1.18", default-features = false }
+octofhir-fhir-model = { version = "0.1.19", default-features = false }
 
 # CLI
 clap = { version = "4.6.7", features = ["derive", "env"] }
@@ -30,14 +30,14 @@ anyhow = "1.0.104"
 annotate-snippets = "0.12.16"
 
 # Lint engine (banshee, published on crates.io)
-banshee_hir = "0.2.6"
-banshee_parser = "0.2.6"
-banshee_lexer = "0.2.6"
-banshee_syntax = "0.2.6"
-banshee_format = "0.2.6"
+banshee_hir = "0.2.7"
+banshee_parser = "0.2.7"
+banshee_lexer = "0.2.7"
+banshee_syntax = "0.2.7"
+banshee_format = "0.2.7"
 
 # Libraries (SQLQuery content) and terminology filters
-base64 = "0.22.1"
+base64 = "0.23.1"
 regex = "1.13.1"
 
 # Serialization
@@ -49,7 +49,7 @@ async-trait = "0.1.92"
 # Crates name the tokio features they use; the library needs only a
 # current-thread runtime and the async write traits.
 tokio = { version = "1.53.3", default-features = false }
-futures-util = "0.3.34"
+futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
 pin-project-lite = "0.2.17"
 
 # Database
@@ -63,8 +63,9 @@ sqlx-postgres = { version = "0.9.0", default-features = false, features = [
 
 # Output formats
 csv = "1.4.0"
-arrow = { version = "60.0.0" }
-parquet = { version = "60.0.0", features = ["arrow", "snap", "zstd", "lz4", "flate2"] }
+arrow-array = "60.0.0"
+arrow-schema = "60.0.0"
+parquet = { version = "60.0.0", default-features = false, features = ["arrow", "snap", "zstd", "lz4", "flate2-zlib-rs", "simdutf8"] }
 chrono = { version = "0.4.45", default-features = false, features = ["std"] }
 bytes = "1.12.1"
 

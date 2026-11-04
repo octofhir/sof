@@ -280,3 +280,15 @@ Licensed under either of
 at your option.
 
 Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in this project by you, as defined in the Apache-2.0 license, shall be dual licensed as above, without any additional terms or conditions.
+
+### Linting with schemas supplied by the host
+
+The default lint crate retains its package-loading helpers. An application that
+already owns its FHIR schemas can exclude the downloader and SQLite:
+
+```toml
+octofhir-sof-lint = { version = "0.3.4", default-features = false }
+```
+
+Construct `FhirSchemaProvider::with_schemas(schemas)` and use the same `lint`,
+`lint_view` and `lint_sql` APIs. Enable `packages` for `from_package` and `load`.

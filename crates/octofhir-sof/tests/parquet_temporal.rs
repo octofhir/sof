@@ -1,11 +1,11 @@
 //! Round trips through the public writer, not the private conversion helpers.
 #![cfg(feature = "parquet")]
 
-use arrow::array::{
+use arrow_array::{
     Array, Date32Array, StringArray, Time64MicrosecondArray, TimestampMicrosecondArray,
 };
-use arrow::datatypes::{DataType, TimeUnit};
-use arrow::record_batch::{RecordBatch, RecordBatchReader};
+use arrow_array::{RecordBatch, RecordBatchReader};
+use arrow_schema::{DataType, TimeUnit};
 use bytes::Bytes;
 use octofhir_sof::output::{
     AsyncOutputWriter, AsyncWriter, OutputWriter, ParquetCompression, ParquetWriter,
@@ -256,6 +256,7 @@ fn other_types_and_nullability_are_unchanged() {
             ParquetCompression::None,
             ParquetCompression::Snappy,
             ParquetCompression::Gzip,
+            ParquetCompression::Lz4,
             ParquetCompression::Zstd,
         ] {
             let batch = round_trip(&native().with_compression(codec), &r);

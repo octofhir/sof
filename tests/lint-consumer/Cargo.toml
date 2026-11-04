@@ -1,0 +1,11 @@
+[package]
+name = "sof-lint-consumer"
+version = "0.0.0"
+edition = "2024"
+publish = false
+[workspace]
+[dependencies]
+octofhir-sof = { path = "../../crates/octofhir-sof", default-features = false }
+octofhir-sof-lint = { path = "../../crates/octofhir-sof-lint", default-features = false }
+octofhir-fhirschema = { version = "0.3.35", default-features = false }
+serde_json = "1"

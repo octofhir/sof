@@ -42,6 +42,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: bash scripts/check-library-deps.sh
+      - name: Lint without a package loader
+        run: |
+          cargo run --manifest-path tests/lint-consumer/Cargo.toml
+          cargo tree --manifest-path tests/lint-consumer/Cargo.toml --edges normal,build --prefix none --format '{p}' > lint.tree
+          if grep -E '^(octofhir-canonical-manager|reqwest|hyper|rustls|native-tls|openssl-sys|rusqlite|libsqlite3-sys) v' lint.tree; then
+            echo "Unexpected package loading dependencies in supplied-schema lint"
+            exit 1
+          fi
 
   postgres-conformance:
     name: PostgreSQL conformance and native CLI

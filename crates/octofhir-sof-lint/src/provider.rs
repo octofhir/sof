@@ -4,9 +4,13 @@
 use std::collections::HashMap;
 
 use banshee_hir::{ColumnInfo, DataType, SchemaProvider, TableInfo, TableType};
+#[cfg(feature = "packages")]
 use octofhir_canonical_manager::CanonicalManager;
-use octofhir_fhirschema::{FhirSchema, FhirSchemaElement, StructureDefinition, translate};
+use octofhir_fhirschema::{FhirSchema, FhirSchemaElement};
+#[cfg(feature = "packages")]
+use octofhir_fhirschema::{StructureDefinition, translate};
 
+#[cfg(feature = "packages")]
 use crate::LintError;
 
 /// A [`SchemaProvider`] backed by FHIR schemas.
@@ -53,6 +57,7 @@ impl FhirSchemaProvider {
 
     /// Load every `StructureDefinition` of a package already present in the
     /// canonical-manager store and adapt them into schemas.
+    #[cfg(feature = "packages")]
     pub async fn from_package(
         manager: &CanonicalManager,
         package_name: &str,
@@ -82,6 +87,7 @@ impl FhirSchemaProvider {
 
     /// Initialise a default canonical-manager and load a package, installing it
     /// first when a `version` is given (offline-only when it is omitted).
+    #[cfg(feature = "packages")]
     pub async fn load(package_name: &str, version: Option<&str>) -> Result<Self, LintError> {
         let manager = CanonicalManager::with_default_config()
             .await

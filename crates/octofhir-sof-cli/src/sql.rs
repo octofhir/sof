@@ -22,9 +22,9 @@ use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand};
 use octofhir_sof::TerminologyProvider;
 use octofhir_sof::catalog::{Catalog, CatalogSource};
-use octofhir_sof::library::{
-    AnnotatedOptions, ParameterValue, SqlLibrary, SqlLibraryKind, bind_parameters, build_annotated,
-};
+use octofhir_sof::library::{AnnotatedOptions, SqlLibrary, SqlLibraryKind, build_annotated};
+#[cfg(feature = "duckdb")]
+use octofhir_sof::library::{ParameterValue, bind_parameters};
 use octofhir_sof::plan::{Artifact, ContextArtifacts, Edge, ResolvedJob, Resolver};
 use serde_json::{Value, json};
 
@@ -286,6 +286,7 @@ struct Sources {
     context: ContextArtifacts,
     remote: Option<Arc<dyn TerminologyProvider>>,
     send_definitions: bool,
+    #[cfg(feature = "duckdb")]
     options: octofhir_sof::CompileOptions,
 }
 
@@ -323,6 +324,7 @@ fn sources(args: &ArtifactArgs) -> Result<Sources> {
     Ok(Sources {
         catalog,
         context,
+        #[cfg(feature = "duckdb")]
         options: super::compile_options(remote.as_ref()),
         remote,
         send_definitions: args.tx_definitions,
@@ -558,6 +560,7 @@ fn postgres_guard(_subject: &Subject) -> Value {
 
 /// The `Parameters` a run binds: the --parameters file, then --param values
 /// converted to the types `library` declares.
+#[cfg(feature = "duckdb")]
 fn parameters_of(library: &SqlLibrary, data: &DataArgs) -> Result<HashMap<String, ParameterValue>> {
     let mut parameters: Vec<Value> = match &data.parameters {
         Some(path) => {

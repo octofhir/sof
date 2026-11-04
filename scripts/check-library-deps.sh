@@ -46,10 +46,10 @@ for mode in default parquet; do
     cargo run --manifest-path "$tmp/Cargo.toml" "${flags[@]}"
     cargo tree --manifest-path "$tmp/Cargo.toml" --locked "${flags[@]}" \
         --edges normal,build --prefix none --format '{p}' > "$tmp/$mode.tree"
-    if grep -Eq '^reqwest v' "$tmp/$mode.tree"; then
-        echo "ERROR: independent $mode consumer pulls in reqwest" >&2
+    if grep -Eq '^(reqwest|hyper|rustls|native-tls|openssl-sys|arrow|arrow-arith|arrow-csv|arrow-json|arrow-ord|arrow-row|arrow-string|brotli|brotli-decompressor) v' "$tmp/$mode.tree"; then
+        echo "ERROR: independent $mode consumer pulls in unused transport/Arrow/codec dependencies" >&2
         cat "$tmp/$mode.tree" >&2
         exit 1
     fi
-    echo "Independent $mode consumer builds and runs without reqwest."
+    echo "Independent $mode consumer builds and runs without unused transport/Arrow/codec dependencies."
 done

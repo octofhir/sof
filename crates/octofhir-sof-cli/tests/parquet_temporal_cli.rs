@@ -135,11 +135,11 @@ fn parquet_requires_opt_in_build() {
 #[cfg(feature = "parquet")]
 mod parquet_output {
     use super::*;
-    use arrow::array::{
+    use arrow_array::RecordBatch;
+    use arrow_array::{
         Array, Date32Array, StringArray, Time64MicrosecondArray, TimestampMicrosecondArray,
     };
-    use arrow::datatypes::{DataType, TimeUnit};
-    use arrow::record_batch::RecordBatch;
+    use arrow_schema::{DataType, TimeUnit};
     use bytes::Bytes;
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 

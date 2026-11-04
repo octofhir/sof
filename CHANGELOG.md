@@ -1,3 +1,13 @@
+## [0.3.4] - 2026-11-04
+
+### Changed
+- Add a lint mode without package loading (`default-features = false`): supplied schemas work without canonical-manager, SQLite or HTTP. Default package-loading helpers remain available.
+- Disable the unused canonical-manager CLI and FHIRSchema HTTP client in the lint library.
+- Depend directly on Arrow arrays and schemas for Parquet output instead of the full Arrow facade.
+- Select the supported Parquet compression codecs explicitly; retain Snappy, Gzip, LZ4 and Zstd, including the existing zlib-rs and SIMD UTF-8 paths.
+- Trim unused Tokio and futures utility features and update private base64 to 0.23.
+- Refresh compatible dependencies and the minimum versions of the optimized OctoFHIR libraries.
+
 # Changelog
 
 All notable changes to this project are documented here. The format follows

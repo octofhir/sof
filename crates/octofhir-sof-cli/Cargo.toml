@@ -24,7 +24,7 @@ clap = { workspace = true }
 anyhow = { workspace = true }
 annotate-snippets = { workspace = true }
 serde_json = { workspace = true }
-tokio = { workspace = true, features = ["full"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 sqlx-postgres = { workspace = true, optional = true }
 tracing-subscriber = { workspace = true, optional = true }
 
@@ -43,7 +43,8 @@ guard = ["octofhir-sof/guard"]
 packages = ["octofhir-sof/packages"]
 
 [dev-dependencies]
-arrow = { workspace = true }
+arrow-array = { workspace = true }
+arrow-schema = { workspace = true }
 parquet = { workspace = true }
 bytes = { workspace = true }
 sqlx-core = { workspace = true }

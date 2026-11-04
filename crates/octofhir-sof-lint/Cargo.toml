@@ -15,7 +15,7 @@ categories = ["development-tools", "parser-implementations"]
 octofhir-sof = { workspace = true }
 octofhir-fhirpath = { workspace = true }
 octofhir-fhirschema = { workspace = true }
-octofhir-canonical-manager = { workspace = true }
+octofhir-canonical-manager = { workspace = true, optional = true }
 banshee_hir = { workspace = true }
 banshee_parser = { workspace = true }
 serde_json = { workspace = true }
@@ -24,3 +24,8 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }
+
+[features]
+# Preserve package-loading convenience APIs in a default install.
+default = ["packages"]
+packages = ["dep:octofhir-canonical-manager"]

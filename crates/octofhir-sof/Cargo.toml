@@ -42,7 +42,8 @@ duckdb = { workspace = true, optional = true }
 
 # Output formats
 csv = { workspace = true }
-arrow = { workspace = true, optional = true }
+arrow-array = { workspace = true, optional = true }
+arrow-schema = { workspace = true, optional = true }
 parquet = { workspace = true, optional = true }
 chrono = { workspace = true, features = ["clock"] }
 
@@ -71,7 +72,7 @@ default = []
 # SQL generation itself needs no feature; hosts with their own pool implement
 # `SqlExecutor` instead.
 postgres = ["dep:sqlx-core", "dep:sqlx-postgres"]
-parquet = ["dep:arrow", "dep:parquet"]
+parquet = ["dep:arrow-array", "dep:arrow-schema", "dep:parquet"]
 # `HttpTerminologyProvider` (+ `CachedTerminologyProvider`) for resolving
 # memberOf/subsumes/translate against a remote FHIR terminology server.
 tx-remote = ["octofhir-fhir-model/http-client", "octofhir-fhir-model/caching"]
