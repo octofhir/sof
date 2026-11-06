@@ -46,7 +46,8 @@ use regex::Regex;
 use serde_json::Value;
 
 use crate::expansion::{
-    Expander, ExpansionError, ExpansionStamp, Lookup, Resolved, TerminologySource, split_canonical,
+    Expander, ExpansionError, ExpansionStamp, Lookup, Resolved, TerminologySource, dated_by,
+    split_canonical,
 };
 use crate::plan::{ArtifactSource, ContextArtifacts, PlanError, TerminologyContent};
 use crate::relations::{value_set_record, value_set_rows};
@@ -343,6 +344,26 @@ impl Catalog {
         Lookup::Found(Resolved {
             resource: (*latest.resource).clone(),
             origin: latest.origin.clone(),
+        })
+    }
+
+    /// The latest version of the `resource_type` with `url` dated on or before
+    /// `date`, for a `compose.lockedDate`.
+    pub fn find_as_of(&self, resource_type: &str, url: &str, date: &str) -> Lookup {
+        let dated: Option<&Entry> = self
+            .by_url
+            .get(url)
+            .into_iter()
+            .flatten()
+            .map(|&index| &self.entries[index])
+            .filter(|entry| entry.resource_type == resource_type)
+            .filter(|entry| dated_by(&entry.resource, date))
+            .max_by(|a, b| compare_versions(&a.resource, &b.resource));
+        dated.map_or(Lookup::Missing, |entry| {
+            Lookup::Found(Resolved {
+                resource: (*entry.resource).clone(),
+                origin: entry.origin.clone(),
+            })
         })
     }
 
@@ -653,6 +674,23 @@ impl TerminologySource for CatalogTerminology<'_> {
         }
         Ok(self.catalog.find(Some(resource_type), url, version))
     }
+
+    async fn find_as_of(
+        &self,
+        resource_type: &str,
+        url: &str,
+        date: &str,
+    ) -> Result<Lookup, ExpansionError> {
+        if let Some(resource) = self.context.find(Some(resource_type), url, None)
+            && dated_by(&resource, date)
+        {
+            return Ok(Lookup::Found(Resolved {
+                resource,
+                origin: "context".into(),
+            }));
+        }
+        Ok(self.catalog.find_as_of(resource_type, url, date))
+    }
 }
 
 #[async_trait]
@@ -664,6 +702,15 @@ impl TerminologySource for Catalog {
         version: Option<&str>,
     ) -> Result<Lookup, ExpansionError> {
         Ok(Catalog::find(self, Some(resource_type), url, version))
+    }
+
+    async fn find_as_of(
+        &self,
+        resource_type: &str,
+        url: &str,
+        date: &str,
+    ) -> Result<Lookup, ExpansionError> {
+        Ok(Catalog::find_as_of(self, resource_type, url, date))
     }
 }
 

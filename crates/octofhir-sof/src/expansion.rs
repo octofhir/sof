@@ -20,7 +20,15 @@
 //!   `regex`) and on its declared properties (`=`, `in`, `not-in`, `regex`,
 //!   `exists`);
 //! - `compose.inactive = false` drops inactive codes; otherwise they stay,
-//!   flagged.
+//!   flagged;
+//! - `compose.lockedDate` picks the versions of what is not tied to one, the
+//!   latest dated on or before it, and a version named outright has to be
+//!   dated by then too; it reaches into imported value sets that have none;
+//! - the supplements named by the `valueset-supplement` extension add their
+//!   properties and designations to their code system;
+//! - a code system with `caseSensitive = false` matches codes in any case, and
+//!   a member carries the code as the code system writes it. Without the
+//!   element codes compare exactly.
 //!
 //! The result is a `ValueSet.expansion` whose parameters record the code
 //! system versions (`version`, `system|version`) and imported value sets
@@ -108,7 +116,37 @@ pub trait TerminologySource: Send + Sync {
         url: &str,
         version: Option<&str>,
     ) -> Result<Lookup, ExpansionError>;
+
+    /// The latest version of the `resource_type` with `url` dated on or before
+    /// `date`, for `compose.lockedDate`. A source that can only give its
+    /// latest version answers for that one, and refuses if it is newer.
+    async fn find_as_of(
+        &self,
+        resource_type: &str,
+        url: &str,
+        date: &str,
+    ) -> Result<Lookup, ExpansionError> {
+        Ok(match self.find(resource_type, url, None).await? {
+            Lookup::Found(resolved) if !dated_by(&resolved.resource, date) => Lookup::Ambiguous(
+                format!("{url} is only available in a version later than the locked date {date}"),
+            ),
+            other => other,
+        })
+    }
 }
+
+/// Whether a resource's `date` is on or before `limit`. FHIR dates can be
+/// partial, so they compare at the precision they share; no date cannot tell.
+#[must_use]
+pub fn dated_by(resource: &Value, limit: &str) -> bool {
+    resource["date"].as_str().is_some_and(|date| {
+        let shared = date.len().min(limit.len());
+        date.as_bytes()[..shared] <= limit.as_bytes()[..shared]
+    })
+}
+
+/// The extension naming a code system supplement a value set depends on.
+const SUPPLEMENT: &str = "http://hl7.org/fhir/StructureDefinition/valueset-supplement";
 
 /// A member of a value set.
 #[derive(Clone, Debug)]
@@ -175,13 +213,80 @@ struct CodeSystemIndex {
     by_code: HashMap<String, usize>,
     /// Codes of the properties the code system declares.
     declared: HashSet<String>,
+    /// `caseSensitive = false`: [`by_code`](Self::by_code) holds lowercase keys.
+    case_insensitive: bool,
+}
+
+impl CodeSystemIndex {
+    /// The concept with this code, by the code system's own rule for comparing codes.
+    fn position(&self, code: &str) -> Option<usize> {
+        if self.case_insensitive {
+            self.by_code.get(&code.to_lowercase()).copied()
+        } else {
+            self.by_code.get(code).copied()
+        }
+    }
+
+    /// Adds what a supplement says about concepts of this code system.
+    fn apply_supplement(&mut self, supplement: &Value) -> Result<(), ExpansionError> {
+        let label = supplement["url"].as_str().unwrap_or_default().to_owned();
+        self.declared.extend(
+            supplement["property"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|property| property["code"].as_str().map(str::to_owned)),
+        );
+        let mut pending: Vec<&Value> = supplement["concept"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .collect();
+        while let Some(concept) = pending.pop() {
+            pending.extend(concept["concept"].as_array().into_iter().flatten());
+            let code = concept["code"].as_str().ok_or_else(|| {
+                undeterminable(format!("a concept of supplement {label} has no code"))
+            })?;
+            let position = self.position(code).ok_or_else(|| {
+                undeterminable(format!(
+                    "supplement {label} speaks of code {code}, which {} does not have",
+                    cs_label(self)
+                ))
+            })?;
+            let target = &mut self.concepts[position];
+            target.properties.extend(
+                concept["property"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|property| {
+                        Some((
+                            property["code"].as_str()?.to_owned(),
+                            property_text(property)?,
+                        ))
+                    }),
+            );
+            target.designation.extend(
+                concept["designation"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .cloned(),
+            );
+        }
+        Ok(())
+    }
 }
 
 /// Computes memberships against one [`TerminologySource`]; code systems are
 /// read once per expander.
 pub struct Expander<'a> {
     source: &'a dyn TerminologySource,
-    code_systems: HashMap<(String, Option<String>), Arc<CodeSystemIndex>>,
+    code_systems: HashMap<CodeSystemKey, Arc<CodeSystemIndex>>,
+    /// The `compose.lockedDate` in force.
+    locked: Option<String>,
+    /// Canonicals of the supplements the value sets so far name.
+    supplements: Vec<String>,
     used_code_systems: BTreeSet<String>,
     used_value_sets: BTreeSet<String>,
     /// Canonicals of the value sets being expanded, to refuse a cycle.
@@ -192,11 +297,16 @@ pub struct Expander<'a> {
 
 type BoxFuture<'s, T> = Pin<Box<dyn Future<Output = T> + Send + 's>>;
 
+/// A code system as a compose reaches it: url, version, locked date, supplements in force.
+type CodeSystemKey = (String, Option<String>, Option<String>, usize);
+
 impl<'a> Expander<'a> {
     pub fn new(source: &'a dyn TerminologySource) -> Self {
         Self {
             source,
             code_systems: HashMap::new(),
+            locked: None,
+            supplements: Vec::new(),
             used_code_systems: BTreeSet::new(),
             used_value_sets: BTreeSet::new(),
             path: Vec::new(),
@@ -291,6 +401,18 @@ impl<'a> Expander<'a> {
                     describe(value_set)
                 ))
             })?;
+            let outer_lock = self.locked.clone();
+            if let Some(date) = compose["lockedDate"].as_str() {
+                self.locked = Some(date.to_owned());
+            }
+            for extension in value_set["extension"].as_array().into_iter().flatten() {
+                if extension["url"] == SUPPLEMENT
+                    && let Some(canonical) = extension["valueCanonical"].as_str()
+                    && !self.supplements.iter().any(|known| known == canonical)
+                {
+                    self.supplements.push(canonical.to_owned());
+                }
+            }
             let mut members = Members::default();
             for include in compose["include"].as_array().into_iter().flatten() {
                 for member in self.include(include).await?.list {
@@ -307,6 +429,7 @@ impl<'a> Expander<'a> {
             if compose["inactive"] == false {
                 members.retain(|member| !member.inactive);
             }
+            self.locked = outer_lock;
             Ok(members)
         })
     }
@@ -356,9 +479,8 @@ impl<'a> Expander<'a> {
                 let known = match &index {
                     Some(index) => Some(
                         index
-                            .by_code
-                            .get(code)
-                            .map(|&i| &index.concepts[i])
+                            .position(code)
+                            .map(|i| &index.concepts[i])
                             .ok_or_else(|| {
                                 undeterminable(format!(
                                     "code {code} is not in code system {}",
@@ -374,7 +496,7 @@ impl<'a> Expander<'a> {
                         .as_ref()
                         .and_then(|index| index.version.clone())
                         .or_else(|| version.map(str::to_owned)),
-                    code: code.to_owned(),
+                    code: known.map_or(code, |known| known.code.as_str()).to_owned(),
                     display: concept["display"]
                         .as_str()
                         .map(str::to_owned)
@@ -439,7 +561,7 @@ impl<'a> Expander<'a> {
             if self.path.iter().any(|seen| seen == url) {
                 return Err(undeterminable(format!("ValueSet {url} imports itself")));
             }
-            let resolved = match self.source.find("ValueSet", url, version).await? {
+            let resolved = match self.find("ValueSet", url, version).await? {
                 Lookup::Found(resolved) => resolved,
                 Lookup::Missing => {
                     return Err(undeterminable(format!(
@@ -485,12 +607,65 @@ impl<'a> Expander<'a> {
         Ok(self.lookup_code_system(url, version).await?.ok())
     }
 
+    /// Finds an artifact under the locked date in force.
+    async fn find(
+        &self,
+        resource_type: &str,
+        url: &str,
+        version: Option<&str>,
+    ) -> Result<Lookup, ExpansionError> {
+        let Some(date) = &self.locked else {
+            return self.source.find(resource_type, url, version).await;
+        };
+        if version.is_none() {
+            return self.source.find_as_of(resource_type, url, date).await;
+        }
+        Ok(match self.source.find(resource_type, url, version).await? {
+            Lookup::Found(resolved) if !dated_by(&resolved.resource, date) => Lookup::Ambiguous(
+                format!("the version of {url} it names is not available on the locked date {date}"),
+            ),
+            other => other,
+        })
+    }
+
+    /// Applies the supplements of this code system; one that cannot be found or is not a
+    /// supplement of it would change what filters select, so that ends the expansion.
+    async fn apply_supplements(&self, index: &mut CodeSystemIndex) -> Result<(), ExpansionError> {
+        for canonical in &self.supplements {
+            let (url, version) = split_canonical(canonical);
+            let resolved = match self.source.find("CodeSystem", url, version).await? {
+                Lookup::Found(resolved) => resolved,
+                _ => {
+                    return Err(undeterminable(format!(
+                        "supplement {canonical} cannot be resolved"
+                    )));
+                }
+            };
+            let supplement = &resolved.resource;
+            if supplement["content"] != "supplement" {
+                return Err(undeterminable(format!(
+                    "{canonical} is named as a supplement, but is not one"
+                )));
+            }
+            let base = supplement["supplements"].as_str().unwrap_or_default();
+            if split_canonical(base).0 == index.url {
+                index.apply_supplement(supplement)?;
+            }
+        }
+        Ok(())
+    }
+
     async fn lookup_code_system(
         &mut self,
         url: &str,
         version: Option<&str>,
     ) -> Result<Result<Arc<CodeSystemIndex>, String>, ExpansionError> {
-        let key = (url.to_owned(), version.map(str::to_owned));
+        let key = (
+            url.to_owned(),
+            version.map(str::to_owned),
+            self.locked.clone(),
+            self.supplements.len(),
+        );
         if let Some(index) = self.code_systems.get(&key) {
             return Ok(Ok(index.clone()));
         }
@@ -498,7 +673,7 @@ impl<'a> Expander<'a> {
             Some(version) => format!("{url}|{version}"),
             None => url.to_owned(),
         };
-        let resolved = match self.source.find("CodeSystem", url, version).await? {
+        let resolved = match self.find("CodeSystem", url, version).await? {
             Lookup::Found(resolved) => resolved,
             Lookup::Missing => {
                 return Ok(Err(format!("code system {named} cannot be resolved here")));
@@ -514,7 +689,9 @@ impl<'a> Expander<'a> {
                 )));
             }
         }
-        let index = Arc::new(index_code_system(url, code_system)?);
+        let mut index = index_code_system(url, code_system)?;
+        self.apply_supplements(&mut index).await?;
+        let index = Arc::new(index);
         self.used_code_systems.insert(match &index.version {
             Some(version) => format!("{url}|{version}"),
             None => url.to_owned(),
@@ -586,6 +763,7 @@ fn index_code_system(url: &str, code_system: &Value) -> Result<CodeSystemIndex, 
     let status_code = local(STATUS, "status");
     let not_selectable_code = local(NOT_SELECTABLE, "notSelectable");
 
+    let case_insensitive = code_system["caseSensitive"] == false;
     let mut concepts: Vec<Concept> = Vec::new();
     let mut by_code: HashMap<String, usize> = HashMap::new();
     let mut parent_codes: Vec<(usize, String)> = Vec::new();
@@ -618,7 +796,12 @@ fn index_code_system(url: &str, code_system: &Value) -> Result<CodeSystemIndex, 
                 .any(|(code, text)| code == name && text == value)
         };
         let index = concepts.len();
-        if by_code.insert(code.to_owned(), index).is_some() {
+        let key = if case_insensitive {
+            code.to_lowercase()
+        } else {
+            code.to_owned()
+        };
+        if by_code.insert(key, index).is_some() {
             return Err(undeterminable(format!(
                 "code system {url} defines code {code} twice"
             )));
@@ -653,7 +836,12 @@ fn index_code_system(url: &str, code_system: &Value) -> Result<CodeSystemIndex, 
         }
     }
     for (child, parent_code) in parent_codes {
-        if let Some(&parent) = by_code.get(&parent_code)
+        let key = if case_insensitive {
+            parent_code.to_lowercase()
+        } else {
+            parent_code
+        };
+        if let Some(&parent) = by_code.get(&key)
             && !concepts[child].parents.contains(&parent)
         {
             concepts[child].parents.push(parent);
@@ -670,6 +858,7 @@ fn index_code_system(url: &str, code_system: &Value) -> Result<CodeSystemIndex, 
         concepts,
         by_code,
         declared: declared.into_keys().collect(),
+        case_insensitive,
     })
 }
 
@@ -699,7 +888,7 @@ fn apply_filter(index: &CodeSystemIndex, filter: &Value) -> Result<HashSet<usize
     let all = || (0..index.concepts.len()).collect::<HashSet<usize>>();
     let codes = |list: &str| -> HashSet<usize> {
         list.split(',')
-            .filter_map(|code| index.by_code.get(code.trim()).copied())
+            .filter_map(|code| index.position(code.trim()))
             .collect()
     };
     let unsupported = || {
@@ -709,7 +898,7 @@ fn apply_filter(index: &CodeSystemIndex, filter: &Value) -> Result<HashSet<usize
         ))
     };
     if property == "concept" || (property == "code" && !index.declared.contains("code")) {
-        let code = index.by_code.get(value).copied();
+        let code = index.position(value);
         return Ok(match op {
             "is-a" => code.map(|i| with_descendants(index, i)).unwrap_or_default(),
             "descendent-of" => code
@@ -1095,6 +1284,167 @@ mod tests {
         assert!(expansion["parameter"].as_array().unwrap().contains(
             &json!({"name": "used-valueset", "valueUri": "http://example.org/cardiac|1"})
         ));
+    }
+
+    fn dated(version: &str, date: &str, codes: &[&str]) -> Value {
+        let concepts: Vec<Value> = codes.iter().map(|code| json!({"code": code})).collect();
+        json!({"resourceType": "CodeSystem", "url": CS, "version": version, "date": date,
+            "status": "active", "content": "complete", "concept": concepts})
+    }
+
+    /// Versions by date, as a source that holds more than its latest answers.
+    struct Dated(Vec<Value>);
+
+    #[async_trait]
+    impl TerminologySource for Dated {
+        async fn find(
+            &self,
+            _resource_type: &str,
+            url: &str,
+            version: Option<&str>,
+        ) -> Result<Lookup, ExpansionError> {
+            Ok(self
+                .0
+                .iter()
+                .filter(|resource| resource["url"] == url)
+                .rfind(|resource| version.is_none_or(|version| resource["version"] == version))
+                .map_or(Lookup::Missing, |resource| {
+                    Lookup::Found(Resolved {
+                        resource: resource.clone(),
+                        origin: "fixture".into(),
+                    })
+                }))
+        }
+
+        async fn find_as_of(
+            &self,
+            _resource_type: &str,
+            url: &str,
+            date: &str,
+        ) -> Result<Lookup, ExpansionError> {
+            Ok(self
+                .0
+                .iter()
+                .filter(|resource| resource["url"] == url && dated_by(resource, date))
+                .next_back()
+                .map_or(Lookup::Missing, |resource| {
+                    Lookup::Found(Resolved {
+                        resource: resource.clone(),
+                        origin: "fixture".into(),
+                    })
+                }))
+        }
+    }
+
+    async fn dated_codes(value_set: &Value) -> Result<Vec<String>, ExpansionError> {
+        let source = Dated(vec![
+            dated("1", "2020-01-01", &["old"]),
+            dated("2", "2024-06", &["new"]),
+        ]);
+        let expansion = Expander::new(&source).expand_stamped(value_set).await?;
+        Ok(expansion["contains"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["code"].as_str().unwrap().to_owned())
+            .collect())
+    }
+
+    #[tokio::test]
+    async fn the_locked_date_picks_the_version() {
+        let compose =
+            |date: &str| value_set(json!({"lockedDate": date, "include": [{"system": CS}]}));
+        assert_eq!(dated_codes(&compose("2021-01-01")).await.unwrap(), ["old"]);
+        assert_eq!(dated_codes(&compose("2024-06-15")).await.unwrap(), ["new"]);
+        assert_eq!(
+            dated_codes(&value_set(json!({"include": [{"system": CS}]})))
+                .await
+                .unwrap(),
+            ["new"]
+        );
+        assert!(dated_codes(&compose("2019-01-01")).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_named_version_has_to_be_available_on_the_locked_date() {
+        let compose = |version: &str| {
+            value_set(json!({"lockedDate": "2021-01-01",
+                "include": [{"system": CS, "version": version}]}))
+        };
+        assert_eq!(dated_codes(&compose("1")).await.unwrap(), ["old"]);
+        let error = dated_codes(&compose("2")).await.unwrap_err();
+        assert!(message(error).contains("locked date"));
+    }
+
+    #[tokio::test]
+    async fn a_source_with_only_its_latest_refuses_what_it_cannot_lock() {
+        let locked = value_set(json!({"lockedDate": "2001-01-01", "include": [{"system": CS}]}));
+        let mut system = code_system();
+        system["date"] = json!("2024-01-01");
+        let error = codes(vec![system], &locked).await.unwrap_err();
+        assert!(message(error).contains("later than the locked date"));
+    }
+
+    #[test]
+    fn dates_compare_at_their_shared_precision() {
+        let on = |date: &str, limit: &str| dated_by(&json!({"date": date}), limit);
+        assert!(on("2024", "2024-06-15"));
+        assert!(on("2024-06-15", "2024"));
+        assert!(!on("2025", "2024-06-15"));
+        assert!(!dated_by(&json!({}), "2024"));
+    }
+
+    #[tokio::test]
+    async fn a_supplement_gives_filters_its_properties() {
+        let supplement = json!({"resourceType": "CodeSystem", "url": "http://example.org/supplement",
+            "version": "1", "status": "active", "content": "supplement", "supplements": CS,
+            "property": [{"code": "region", "type": "string"}],
+            "concept": [{"code": "mi", "property": [{"code": "region", "valueString": "eu"}],
+                "designation": [{"language": "de", "value": "Ah"}]}]});
+        let mut set = value_set(json!({"include": [{"system": CS,
+            "filter": [{"property": "region", "op": "=", "value": "eu"}]}]}));
+        set["extension"] = json!([{"url": SUPPLEMENT,
+            "valueCanonical": "http://example.org/supplement"}]);
+        assert_eq!(
+            codes(vec![code_system(), supplement.clone()], &set)
+                .await
+                .unwrap(),
+            ["mi"]
+        );
+
+        let error = codes(vec![code_system()], &set).await.unwrap_err();
+        assert!(message(error).contains("cannot be resolved"));
+
+        let mut unknown = supplement;
+        unknown["concept"][0]["code"] = json!("missing");
+        let error = codes(vec![code_system(), unknown], &set).await.unwrap_err();
+        assert!(message(error).contains("does not have"));
+    }
+
+    #[tokio::test]
+    async fn codes_of_a_case_insensitive_system_match_in_any_case() {
+        let system = json!({"resourceType": "CodeSystem", "url": CS, "version": "1",
+            "status": "active", "content": "complete", "caseSensitive": false,
+            "concept": [{"code": "Alpha"}, {"code": "Beta"}]});
+        let enumerated = value_set(json!({"include": [{"system": CS,
+            "concept": [{"code": "ALPHA"}]}]}));
+        assert_eq!(
+            codes(vec![system.clone()], &enumerated).await.unwrap(),
+            ["Alpha"]
+        );
+        let excluded = value_set(json!({"include": [{"system": CS}],
+            "exclude": [{"system": CS, "concept": [{"code": "beta"}]}]}));
+        assert_eq!(
+            codes(vec![system.clone()], &excluded).await.unwrap(),
+            ["Alpha"]
+        );
+        let filtered = value_set(json!({"include": [{"system": CS,
+            "filter": [{"property": "concept", "op": "=", "value": "BETA"}]}]}));
+        assert_eq!(codes(vec![system], &filtered).await.unwrap(), ["Beta"]);
+
+        // Without the element, and when it is true, codes compare exactly.
+        let exact = value_set(json!({"include": [{"system": CS, "concept": [{"code": "A"}]}]}));
+        assert!(codes(vec![code_system()], &exact).await.is_err());
     }
 
     #[tokio::test]
