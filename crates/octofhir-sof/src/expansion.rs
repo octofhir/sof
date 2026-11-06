@@ -1325,8 +1325,7 @@ mod tests {
             Ok(self
                 .0
                 .iter()
-                .filter(|resource| resource["url"] == url && dated_by(resource, date))
-                .next_back()
+                .rfind(|resource| resource["url"] == url && dated_by(resource, date))
                 .map_or(Lookup::Missing, |resource| {
                     Lookup::Found(Resolved {
                         resource: resource.clone(),
