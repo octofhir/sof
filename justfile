@@ -81,7 +81,7 @@ conformance-duckdb:
 # Start a throwaway PostgreSQL for conformance-pg.
 conformance-db:
     docker run -d --name sof-conformance -e POSTGRES_PASSWORD=postgres \
-      -e POSTGRES_DB=conformance -p 55433:5432 postgres:16-alpine
+      -e POSTGRES_DB=conformance -p 55433:5432 postgres:18-alpine
 
 # --- CLI passthrough ---
 
