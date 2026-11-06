@@ -1,3 +1,10 @@
+## [0.3.5] - 2026-11-06
+
+### Added
+- `Expander`: `compose.lockedDate` picks the versions of what is not tied to one, through the new `TerminologySource::find_as_of` and `Catalog::find_as_of`. It reaches into imported value sets, and a version named outright has to be dated by then too. A source that holds only its latest version refuses when that one is newer.
+- `Expander`: the supplements named by the `valueset-supplement` extension add their properties and designations to their code system; one that cannot be found ends the expansion.
+- `Expander`: a code system with `caseSensitive = false` matches codes in any case, and a member carries the code as the code system writes it.
+
 ## [0.3.4] - 2026-11-04
 
 ### Changed

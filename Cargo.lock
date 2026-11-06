@@ -2332,7 +2332,7 @@ dependencies = [
 
 [[package]]
 name = "octofhir-sof"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "arrow-array 60.1.0",
  "arrow-schema 60.1.0",
@@ -2368,7 +2368,7 @@ dependencies = [
 
 [[package]]
 name = "octofhir-sof-cli"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "annotate-snippets",
  "anyhow",
@@ -2388,7 +2388,7 @@ dependencies = [
 
 [[package]]
 name = "octofhir-sof-lint"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "banshee_hir",
  "banshee_parser",
